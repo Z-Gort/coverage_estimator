@@ -46,14 +46,14 @@ export default function Home() {
                 htmlFor="number-input"
                 className="mb-2 block text-sm font-medium"
               >
-                Enter a number:
+                Enter a tracking number:
               </label>
               <Input
                 id="number-input"
                 type="number"
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
-                placeholder="Enter a number..."
+                placeholder="Enter a tracking number..."
               />
             </div>
 

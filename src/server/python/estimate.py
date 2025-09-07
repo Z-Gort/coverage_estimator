@@ -3,11 +3,16 @@ import json
 import math
 from typing import Any, Dict
 import anthropic
-from utils import analyze_claim_backup, read_security_deposit_claims, read_folder_contents, extract_document_content, run_unit_tests
-import psycopg2
-
-ANTHROPIC_API_KEY = "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"
-MISTRAL_API_KEY = "hnEcbqbI4cumUHOY8yew25sLjLG1Yoyb"
+from utils import (
+    analyze_claim_backup,
+    read_security_deposit_claims,
+    read_folder_contents,
+    extract_document_content,
+    update_database_result,
+    ANTHROPIC_API_KEY,
+    MISTRAL_API_KEY,
+)
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def analyze_individual_document_for_charges(
@@ -319,26 +324,36 @@ def process_claim_by_folder_number(folder_number):
     return analyze_claim_backup(folder_contents, claim_data)
 
 
-def update_database_result(row_id, result_value):
-    try:
-        # Get DATABASE_URL from environment or use default
-        database_url = (
-            "postgresql://postgres:K-aFfRISnScft1hQ@localhost:5432/corgi_fullstack"
-        )
+def run_unit_tests():
+    folder_numbers = [365, 373, 413, 449, 455, 456]
+    claims_dict = read_security_deposit_claims()
 
-        conn = psycopg2.connect(database_url)
-        cur = conn.cursor()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_folder = {
+            executor.submit(process_claim_by_folder_number, folder): folder
+            for folder in folder_numbers
+        }
 
-        cur.execute(
-            "UPDATE corgi_fullstack_post SET result = %s WHERE id = %s",
-            (result_value, row_id),
-        )
+        for future in as_completed(future_to_folder):
+            folder = future_to_folder[future]
+            try:
+                result = future.result()
+                computed_benefit = (
+                    result.get("approved_benefit", "N/A")
+                    if isinstance(result, dict)
+                    else "N/A"
+                )
 
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print(f"Database update failed: {e}")
+                # Get reference values from CSV
+                claim_data = claims_dict.get(str(folder), {})
+                reference_benefit = claim_data.get("Approved Benefit Amount", "N/A")
+                pm_explanation = claim_data.get("PM Explanation", "N/A")
+
+                print(
+                    f"Folder {folder}: Computed=${computed_benefit} | Human=${reference_benefit} | Explan: {pm_explanation}"
+                )
+            except Exception as e:
+                print(f"Folder {folder}: Error - {e}")
 
 
 if __name__ == "__main__":
