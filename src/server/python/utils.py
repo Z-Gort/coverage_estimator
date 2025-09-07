@@ -7,86 +7,78 @@ import json
 from mistralai import Mistral
 
 
-def is_security_deposit_waiver(document, api_key):
-    """
-    Use Claude Haiku to determine if a document contains a security deposit waiver selection.
-    Returns True if the document contains security deposit payment options, False otherwise.
-    """
+# backup
+def analyze_claim_backup(folder_contents, claim_data, api_key):
     client = anthropic.Anthropic(api_key=api_key)
 
-    # Create a prompt to identify security deposit waivers
-    prompt = f"""You are analyzing a document to determine if it contains a "security deposit waiver" selection section.
+    # Prepare the evidence from documents
+    evidence_text = ""
+    for doc in folder_contents:
+        evidence_text += f"\n--- {doc['title']} ---\n"
+        evidence_text += doc["text"]
 
-Look for any section within the document that allows tenants to choose between:
-1. Paying the security deposit in full upfront, OR  
-2. Paying the security deposit in monthly installments
+    # Create the analysis prompt
+    prompt = f"""You are analyzing a security deposit claim. Here is the key information:
 
-This selection could be:
-- A standalone waiver document
-- A section embedded within a lease agreement  
-- Part of any rental document with checkboxes/options for security deposit payment method
-- Any form where tenants can select how they want to pay their security deposit
+CLAIM DETAILS:
 
-DOCUMENT FILENAME: {document.get('title', 'Unknown')}
+MOST IMPORTANT:
+- Max Benefit: {claim_data.get('Max Benefit', 'Not specified')}
+- Amount of Claim: {claim_data.get('Amount of Claim', 'Not specified')}
+OTHER INFORMATION:
+- Monthly Rent: {claim_data.get('Monthly Rent', 'Not specified')}
+- Lease Address: {claim_data.get('Lease Street Address', 'Not specified')}
+- Lease Dates: {claim_data.get('Lease Start Date', 'Not specified')} to {claim_data.get('Lease End Date', 'Not specified')}
+- Move-Out Date: {claim_data.get('Move-Out Date', 'Not specified')}
+- Termination Type: {claim_data.get('Termination Type', 'Not specified')}
 
-DOCUMENT CONTENT:
-{document.get('text', '')}
+EVIDENCE FROM DOCUMENTS:
+{evidence_text}
 
-Based on the filename and content, does this document CONTAIN a security deposit waiver selection (even if it's just one section of a larger document)? Look for actual selection options, checkboxes, or clear choices between payment methods.
+Please analyze this claim and determine the approved benefit amount along with your reasoning based on the following rules.
 
-Mark as true if there are specific options for tenants to choose their security deposit payment method, even if embedded within a larger document."""
-
-    print("Prompt", prompt)
+RULES:
+-- The approved benefit will be between 0 and the minimum of the max benefit and the amount of claim.
+-- The tenant is likely paying the security deposit monthly--that is ok! Do not consider this in your decision.
+-- When in doubt, tend to trust the claim and lean toward approving reasonable amounts
+-- IMPORTANT: A key element in determining what will be covered or not is understanding what items are covered by the insurer and which are solely the responsibility of the tenant.
+e.g. Tenant fees, damages past the end of coverage date, etc... are not covered by the insurer. Rule of thumb is if lease paragraph allowing the charge --> tenenat responsibility.
+"""
 
     try:
         response = client.messages.create(
-            model="claude-3-5-haiku-latest",  # Lightweight model
+            model="claude-sonnet-4-20250514",
             max_tokens=1000,
             messages=[{"role": "user", "content": prompt}],
             tools=[
                 {
-                    "name": "classify_document",
-                    "description": "Classify whether the document contains a security deposit waiver selection",
+                    "name": "submit_claim_analysis",
+                    "description": "Submit the final claim analysis with approved benefit amount and reasoning",
                     "input_schema": {
                         "type": "object",
                         "properties": {
-                            "is_security_deposit_waiver": {
-                                "type": "boolean",
-                                "description": "True if this document contains options for tenants to choose their security deposit payment method (full payment vs installments), False otherwise",
-                            }
+                            "approved_benefit": {
+                                "type": "integer",
+                                "description": "The approved benefit amount in dollars (no cents, whole number only)",
+                            },
+                            "reasoning": {
+                                "type": "string",
+                                "description": "Detailed explanation of the decision including analysis of evidence and factors considered",
+                            },
                         },
-                        "required": ["is_security_deposit_waiver"],
+                        "required": ["approved_benefit", "reasoning"],
                     },
                 }
             ],
-            tool_choice={"type": "tool", "name": "classify_document"},
+            tool_choice={"type": "tool", "name": "submit_claim_analysis"},
         )
 
-        # Extract the boolean result from the tool use
+        # Extract the structured output
         tool_use = response.content[0]
-        print("CHECKING RESULT", tool_use)
-        result = getattr(tool_use, "input", {})
-        if isinstance(result, dict):
-            return result.get("is_security_deposit_waiver", False)
-        return False
+        if tool_use.type == "tool_use" and tool_use.name == "submit_claim_analysis":
+            return tool_use.input
+        else:
+            return {"error": "Unexpected response format from Anthropic API"}
 
     except Exception as e:
-        print(f"Error checking document {document.get('title', 'Unknown')}: {e}")
-        return False
-
-
-def filter_documents(folder_contents, api_key):
-    filtered_contents = []
-
-    for document in folder_contents:
-        print("Checking document: ", document.get("title", "Unknown"))
-        if is_security_deposit_waiver(document, api_key):
-            print(
-                f"Found and filtering out security deposit waiver: {document.get('title', 'Unknown')}"
-            )
-            # Skip this document (don't add to filtered_contents)
-            continue
-
-        filtered_contents.append(document)
-
-    return filtered_contents
+        return {"error": f"API call failed: {str(e)}"}

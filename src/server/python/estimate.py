@@ -4,13 +4,13 @@ import sys
 import json
 from pathlib import Path
 import base64
+from typing import Any, Dict
 import anthropic
 from mistralai import Mistral
-from utils import filter_documents
+from utils import analyze_claim_backup
 import psycopg2
 
 ANTHROPIC_API_KEY = "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"
-
 MISTRAL_API_KEY = "hnEcbqbI4cumUHOY8yew25sLjLG1Yoyb"
 
 
@@ -78,7 +78,7 @@ def extract_document_content(file_path):
     file_extension = file_path.suffix.lower()
     try:
         if file_extension == ".pdf":
-            content =  _extract_pdf_content(file_path)
+            content = _extract_pdf_content(file_path)
             return content
         elif file_extension in [".jpg", ".jpeg", ".png", ".tiff", ".bmp"]:
             content = _extract_image_content(file_path)
@@ -165,42 +165,112 @@ def _extract_image_content(file_path):
         return {"error": f"Mistral OCR failed: {str(e)}"}
 
 
-def analyze_claim_with_anthropic(folder_contents, claim_data, api_key):
-    client = anthropic.Anthropic(api_key=api_key)
+def analyze_individual_document_for_charges(
+    document_content: Dict[str, Any],
+) -> Dict[str, Any]:
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    # Prepare the evidence from documents
+    prompt = f"""Analyze this document to determine if it contains itemized move-out charges, security deposit charges, or outstanding charges from a rental property.
+
+DOCUMENT CONTENT:
+{document_content.get('text', '')}
+
+Please determine:
+1. Does this document enumerate/list specific charges related to move-out, security deposit deductions, outstanding tenant chargesm or very similar?
+2. If yes, extract each itemized charge with its cost and description.
+
+Look for things like:
+- Security deposit itemization/disposition
+- Move-out charges
+- Outstanding balance itemization  
+- Ledger entries showing charges
+- Repair/cleaning costs
+- Damage charges
+- Fee breakdowns
+
+The document should have specific line items with costs, not just summary amounts."""
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+            tools=[
+                {
+                    "name": "analyze_document_charges",
+                    "description": "Submit analysis of whether document contains itemized charges and extract them",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "has_itemized_charges": {
+                                "type": "boolean",
+                                "description": "True if the document contains a list/enumeration of specific charges with costs",
+                            },
+                            "charge_items": {
+                                "type": "array",
+                                "description": "List of itemized charges found in the document",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "cost": {
+                                            "type": "integer",
+                                            "description": "Cost of the charge in dollars (whole numbers only, no cents)",
+                                        },
+                                        "description": {
+                                            "type": "string",
+                                            "description": "Description of the charge/item",
+                                        },
+                                    },
+                                    "required": ["cost", "description"],
+                                },
+                            },
+                        },
+                        "required": ["has_itemized_charges", "charge_items"],
+                    },
+                }
+            ],
+            tool_choice={"type": "tool", "name": "analyze_document_charges"},
+        )
+
+        # Extract the structured output
+        tool_use = response.content[0]
+        if tool_use.type == "tool_use" and tool_use.name == "analyze_document_charges":
+            return tool_use.input  # type: ignore
+        else:
+            return {
+                "has_itemized_charges": False,
+                "charge_items": [],
+                "error": "Unexpected response format",
+            }
+
+    except Exception as e:
+        return {
+            "has_itemized_charges": False,
+            "charge_items": [],
+            "error": f"API call failed: {str(e)}",
+        }
+
+
+def analyze_itemized_charge_coverage(charge_items, folder_contents, claim_data):
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
     evidence_text = ""
     for doc in folder_contents:
-        evidence_text += f"\n--- {doc['title']} ---\n"
-        evidence_text += doc["text"]
+        evidence_text += f"\n--- {doc['title']} ---\n{doc['text']}"
 
-    # Create the analysis prompt
-    prompt = f"""You are analyzing a security deposit claim. Here is the key information:
+    charges_text = ""
+    for i, item in enumerate(charge_items, 1):
+        charges_text += f"{i}. {item['description']}: ${item['cost']}\n"
 
-CLAIM DETAILS:
+    prompt = f"""Analyze these itemized charges for insurance coverage eligibility.
 
-MOST IMPORTANT:
-- Max Benefit: {claim_data.get('Max Benefit', 'Not specified')}
-- Amount of Claim: {claim_data.get('Amount of Claim', 'Not specified')}
-OTHER INFORMATION:
-- Monthly Rent: {claim_data.get('Monthly Rent', 'Not specified')}
-- Lease Address: {claim_data.get('Lease Street Address', 'Not specified')}
-- Lease Dates: {claim_data.get('Lease Start Date', 'Not specified')} to {claim_data.get('Lease End Date', 'Not specified')}
-- Move-Out Date: {claim_data.get('Move-Out Date', 'Not specified')}
-- Termination Type: {claim_data.get('Termination Type', 'Not specified')}
+ITEMIZED CHARGES TO ANALYZE:
+{charges_text}
 
-EVIDENCE FROM DOCUMENTS:
+SUPPORTING DOCUMENTS:
 {evidence_text}
 
-Please analyze this claim and determine the approved benefit amount along with your reasoning based on the following rules.
-
-RULES:
--- The approved benefit will be between 0 and the minimum of the max benefit and the amount of claim.
--- The tenant is likely paying the security deposit monthly--that is ok! Do not consider this in your decision.
--- When in doubt, tend to trust the claim and lean toward approving reasonable amounts
--- IMPORTANT: A key element in determining what will be covered or not is understanding what items are covered by the insurer and which are solely the responsibility of the tenant.
-e.g. Tenant fees, damages past the end of coverage date, etc... are not covered by the insurer. Rule of thumb is if lease paragraph allowing the charge --> tenenat responsibility.
-"""
+For each charge in order, determine if it's covered by insurance or solely tenant responsibility based on lease terms and other related evidence."""
 
     try:
         response = client.messages.create(
@@ -209,56 +279,112 @@ e.g. Tenant fees, damages past the end of coverage date, etc... are not covered 
             messages=[{"role": "user", "content": prompt}],
             tools=[
                 {
-                    "name": "submit_claim_analysis",
-                    "description": "Submit the final claim analysis with approved benefit amount and reasoning",
+                    "name": "submit_coverage_analysis",
+                    "description": "Submit coverage decision for each charge",
                     "input_schema": {
                         "type": "object",
                         "properties": {
-                            "approved_benefit": {
-                                "type": "integer",
-                                "description": "The approved benefit amount in dollars (no cents, whole number only)",
-                            },
-                            "reasoning": {
-                                "type": "string",
-                                "description": "Detailed explanation of the decision including analysis of evidence and factors considered",
-                            },
+                            "coverage_decisions": {
+                                "type": "array",
+                                "description": f"Exactly {len(charge_items)} coverage decisions, one for each charge in order",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "covered": {
+                                            "type": "boolean",
+                                            "description": "True if covered by insurance, false if tenant responsibility",
+                                        },
+                                        "reasoning": {
+                                            "type": "string",
+                                            "description": "Explanation for this coverage decision",
+                                        },
+                                    },
+                                    "required": ["covered", "reasoning"],
+                                },
+                                "minItems": len(charge_items),
+                                "maxItems": len(charge_items),
+                            }
                         },
-                        "required": ["approved_benefit", "reasoning"],
+                        "required": ["coverage_decisions"],
                     },
                 }
             ],
-            tool_choice={"type": "tool", "name": "submit_claim_analysis"},
+            tool_choice={"type": "tool", "name": "submit_coverage_analysis"},
         )
 
-        # Extract the structured output
         tool_use = response.content[0]
-        if tool_use.type == "tool_use" and tool_use.name == "submit_claim_analysis":
-            return tool_use.input
-        else:
-            return {"error": "Unexpected response format from Anthropic API"}
+        if tool_use.type == "tool_use" and tool_use.name == "submit_coverage_analysis":
+            result = tool_use.input
+            coverage_decisions = result.get("coverage_decisions")  # type: ignore
 
+            # Sum covered charges
+            total_covered = sum(
+                charge_items[i]["cost"]
+                for i, decision in enumerate(coverage_decisions)
+                if decision.get("covered")
+            )
+
+            # Apply max benefit cap
+            max_benefit_str = (
+                claim_data.get("Max Benefit").replace("$", "").replace(",", "")
+            )
+            max_benefit = int(float(max_benefit_str))
+            approved_benefit = min(total_covered, max_benefit)
+
+            return {
+                "approved_benefit": approved_benefit,
+                "coverage_decisions": coverage_decisions,
+            }
+        else:
+            return {"error": "Unexpected response format"}
     except Exception as e:
         return {"error": f"API call failed: {str(e)}"}
 
 
-def process_claim_by_folder_number(folder_number, api_key):
+def process_claim_by_folder_number(folder_number):
     claims_dict = read_security_deposit_claims()
     claim_data = claims_dict.get(str(folder_number))
 
-    # Read folder contents
     folder_info = read_folder_contents(str(folder_number))
     folder_contents = []
+    charge_items = []
+    found_itemized_doc = False
 
     for file_info in folder_info:
         content = extract_document_content(file_info["path"])
+        print(f"Content: {content["text"][:20]}")
         if "error" not in content:
             folder_contents.append(content)
-        else:
-            print(f"Warning: Could not process {file_info['name']}: {content['error']}")
 
-    # folder_contents = filter_documents(folder_contents, api_key)
+            if not found_itemized_doc:
+                charge_analysis = analyze_individual_document_for_charges(content)
+                print(f"Charge analysis: {charge_analysis}")
+                if charge_analysis.get("has_itemized_charges"):
+                    charge_items = charge_analysis.get("charge_items", [])
+                    found_itemized_doc = True
 
-    return analyze_claim_with_anthropic(folder_contents, claim_data, api_key)
+    if found_itemized_doc:
+        total_charges = sum(item["cost"] for item in charge_items)
+        claim_amount_str = (
+            claim_data.get("Amount of Claim").replace("$", "").replace(",", "")  # type: ignore
+        )
+        print(f"Found itemized doc, total charges: {total_charges}, claim amount: {claim_amount_str}")
+        try:
+            claim_amount = int(float(claim_amount_str))
+            if total_charges >= 0.8 * claim_amount:
+                return analyze_itemized_charge_coverage(
+                    charge_items, folder_contents, claim_data
+                )
+            else:
+                print(
+                    f"Total charges {total_charges} are less than 80% of claim amount {claim_amount}. Moving to backup."
+                )
+                pass
+        except Exception as e:
+            print(f"Error analyzing itemized charges: {e}")
+            pass
+
+    return analyze_claim_backup(folder_contents, claim_data, ANTHROPIC_API_KEY)
 
 
 def update_database_result(row_id, result_value):
@@ -288,11 +414,11 @@ if __name__ == "__main__":
         folder_number = int(sys.argv[1])
 
         print("starting python script")
-        result = process_claim_by_folder_number(folder_number, ANTHROPIC_API_KEY)
+        result = process_claim_by_folder_number(folder_number)
         print(result)
-        
-        approved_benefit = result.get("approved_benefit")
-        #if not testing, update db
+
+        approved_benefit = result.get("approved_benefit")  # type: ignore
+        # if not testing, update db
         if len(sys.argv) == 3:
             row_id = int(sys.argv[2])
             if approved_benefit is not None:
@@ -301,3 +427,18 @@ if __name__ == "__main__":
     except Exception as e:
         print(json.dumps({"error": f"Script execution failed: {str(e)}"}))
         sys.exit(1)
+
+# 365 -- partial payout (a few uncovered items in ledger)
+# 373 -- normal full payout
+# 413 -- partial payout excluding tenant fees
+# 456 -- payout limited by max benefit
+# 455 -- No coverage pest/gutter (difficult) -- current solution gives full payout
+# 449 -- No coverage for asset protection fee or utility expenses -- current solution gives full payout
+
+# flow:
+# pull from docs--identify security deposit ledger/claim itemization -- will be something enumerating something like outstanding or move out charges--potentially on a document of its own, or in another,
+# extract items with price + description
+# (should be close to claim or above claim in the case it exceeds max benefit--if not throw a warning and I guess we can default to current system(?))
+# feed items to claude with rest of files--it has to determine which items are covered, give back sum
+# return min of this sum and max benefit
+# print result and actual benefit
