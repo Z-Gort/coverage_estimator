@@ -2,6 +2,7 @@ import csv
 import os
 import sys
 import json
+import math
 from pathlib import Path
 import base64
 from typing import Any, Dict
@@ -260,7 +261,54 @@ The document should have specific line items with costs, not just summary amount
         }
 
 
-def analyze_itemized_charge_coverage(charge_items, folder_contents, claim_data):
+def analyze_document_for_monthly_rent(document_content: Dict[str, Any]) -> int | None:
+    """Extract monthly rent from a document if present."""
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    prompt = f"""Look for any monthly rent amount in this document.
+
+TITLE: {document_content.get('title', '')}
+DOCUMENT CONTENT: {document_content.get('text', '')}
+
+Find any monthly rent amount mentioned (from lease agreements, rent schedules, ledgers showing monthly rent payments, etc.)."""
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+            tools=[
+                {
+                    "name": "extract_monthly_rent",
+                    "description": "Extract monthly rent amount if found",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "monthly_rent": {
+                                "type": "integer",
+                                "description": "Monthly rent amount in dollars, null if not found",
+                            }
+                        },
+                        "required": ["monthly_rent"],
+                    },
+                }
+            ],
+            tool_choice={"type": "tool", "name": "extract_monthly_rent"},
+        )
+
+        tool_use = response.content[0]
+        if tool_use.type == "tool_use" and tool_use.name == "extract_monthly_rent":
+            result = tool_use.input
+            if isinstance(result, dict):
+                return result.get("monthly_rent")
+        return None
+    except Exception as e:
+        return None
+
+
+def analyze_itemized_charge_coverage(
+    charge_items, folder_contents, claim_data, monthly_rent=None
+):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     evidence_text = ""
@@ -346,7 +394,13 @@ RULES:
                 claim_data.get("Max Benefit").replace("$", "").replace(",", "")
             )
             max_benefit = int(float(max_benefit_str))
-            approved_benefit = min(total_covered, max_benefit)
+
+            # Apply monthly rent ceiling if available (rounded up to nearest $500)
+            if monthly_rent:
+                monthly_rent_ceiling = math.ceil(monthly_rent / 500) * 500
+                approved_benefit = min(total_covered, max_benefit, monthly_rent_ceiling)
+            else:
+                approved_benefit = min(total_covered, max_benefit)
 
             return {
                 "approved_benefit": approved_benefit,
@@ -366,6 +420,8 @@ def process_claim_by_folder_number(folder_number):
     folder_contents = []
     charge_items = []
     found_itemized_doc = False
+    monthly_rent = None
+    found_monthly_rent = False
 
     for file_info in folder_info:
         content = extract_document_content(file_info["path"])
@@ -373,12 +429,24 @@ def process_claim_by_folder_number(folder_number):
             print(f"Content: {content["text"][:20]}")
             folder_contents.append(content)
 
+            # Look for itemized charges if not found yet
             if not found_itemized_doc:
                 charge_analysis = analyze_individual_document_for_charges(content)
                 print(f"Charge analysis: {charge_analysis}")
                 if charge_analysis.get("has_itemized_charges"):
                     charge_items = charge_analysis.get("charge_items", [])
                     found_itemized_doc = True
+
+            # Look for monthly rent if not found yet
+            if not found_monthly_rent:
+                doc_monthly_rent = analyze_document_for_monthly_rent(content)
+                if doc_monthly_rent:
+                    monthly_rent = doc_monthly_rent
+                    found_monthly_rent = True
+
+            # Stop processing if we found both
+            if found_itemized_doc and found_monthly_rent:
+                break
         else:
             print(f"Error extracting {file_info['path']}: {content['error']}")
             continue
@@ -398,7 +466,7 @@ def process_claim_by_folder_number(folder_number):
                 and total_charges <= claim_amount * 1.2
             ):  # There's one type of ledger which AI can't reliably parse
                 return analyze_itemized_charge_coverage(
-                    charge_items, folder_contents, claim_data
+                    charge_items, folder_contents, claim_data, monthly_rent
                 )
             else:
                 print(
@@ -448,7 +516,11 @@ def run_unit_tests():
             folder = future_to_folder[future]
             try:
                 result = future.result()
-                computed_benefit = result.get("approved_benefit", "N/A")
+                computed_benefit = (
+                    result.get("approved_benefit", "N/A")
+                    if isinstance(result, dict)
+                    else "N/A"
+                )
 
                 # Get reference values from CSV
                 claim_data = claims_dict.get(str(folder), {})
@@ -507,9 +579,10 @@ if __name__ == "__main__":
 # 365 -- partial payout, no coverage income HOA violations, covering property damages only (can't read itemized doc--will payout full)
 # 373 -- normal full payout (good)
 # 413 -- partial payout excluding tenant fees (good)
-# 418 -- partial--excludes fees (good)
+# 417 -- partial--excludes fees (good)
 # 456 -- payout limited by max benefit (good)
 # 455 -- No coverage pest/gutter (difficult) -- (good)
 # 449 -- No coverage for asset protection fee or utility expenses -- (good)
 # 726 -- gives full payout (can't read itemized doc--will payout full)
+# 727 -- partial excluding fees (good)
 # 757 -- normal full payout (good)
