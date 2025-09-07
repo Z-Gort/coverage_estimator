@@ -9,6 +9,7 @@ import anthropic
 from mistralai import Mistral
 from utils import analyze_claim_backup
 import psycopg2
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ANTHROPIC_API_KEY = "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"
 MISTRAL_API_KEY = "hnEcbqbI4cumUHOY8yew25sLjLG1Yoyb"
@@ -42,15 +43,18 @@ def read_security_deposit_claims():
 
         for row in reader:
             tracking_number = row["Tracking Number"]
-            # Remove answers
-            filtered_row = {
-                k: v
-                for k, v in row.items()
-                if k not in ["Approved Benefit Amount", "PM Explanation"]
-            }
-            claims_dict[tracking_number] = filtered_row
+            claims_dict[tracking_number] = row
 
     return claims_dict
+
+
+def filter_claim_data_for_ai(claim_data):
+    """Remove reference answers from claim data before sending to AI"""
+    return {
+        k: v
+        for k, v in claim_data.items()
+        if k not in ["Approved Benefit Amount", "PM Explanation"]
+    }
 
 
 def encode_pdf_to_base64(pdf_path):
@@ -391,7 +395,10 @@ def process_claim_by_folder_number(folder_number):
         )
         try:
             claim_amount = int(float(claim_amount_str))
-            if total_charges >= 0.8 * claim_amount and total_charges <= claim_amount * 1.2: #There's one type of ledger which AI can't reliably parse
+            if (
+                total_charges >= 0.8 * claim_amount
+                and total_charges <= claim_amount * 1.2
+            ):  # There's one type of ledger which AI can't reliably parse
                 return analyze_itemized_charge_coverage(
                     charge_items, folder_contents, claim_data
                 )
@@ -429,20 +436,51 @@ def update_database_result(row_id, result_value):
         print(f"Database update failed: {e}")
 
 
+def run_unit_tests():
+    folder_numbers = [365, 373, 413, 449, 455, 456]
+    claims_dict = read_security_deposit_claims()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_folder = {
+            executor.submit(process_claim_by_folder_number, folder): folder
+            for folder in folder_numbers
+        }
+
+        for future in as_completed(future_to_folder):
+            folder = future_to_folder[future]
+            try:
+                result = future.result()
+                computed_benefit = result.get("approved_benefit", "N/A")
+
+                # Get reference values from CSV
+                claim_data = claims_dict.get(str(folder), {})
+                reference_benefit = claim_data.get("Approved Benefit Amount", "N/A")
+                pm_explanation = claim_data.get("PM Explanation", "N/A")
+
+                print(
+                    f"Folder {folder}: Computed=${computed_benefit} | Human=${reference_benefit} | Explan: {pm_explanation}"
+                )
+            except Exception as e:
+                print(f"Folder {folder}: Error - {e}")
+
 if __name__ == "__main__":
     try:
-        folder_number = int(sys.argv[1])
+        if len(sys.argv) > 1 and sys.argv[1] == "unit":
+            print("Running unit tests...")
+            run_unit_tests()
+        else:
+            folder_number = int(sys.argv[1])
 
-        print("starting python script")
-        result = process_claim_by_folder_number(folder_number)
-        print(result)
+            print("starting python script")
+            result = process_claim_by_folder_number(folder_number)
+            print(result)
 
-        approved_benefit = result.get("approved_benefit")  # type: ignore
-        # if not testing, update db
-        if len(sys.argv) == 3:
-            row_id = int(sys.argv[2])
-            if approved_benefit is not None:
-                update_database_result(row_id, approved_benefit)
+            approved_benefit = result.get("approved_benefit")  # type: ignore
+            # if not testing, update db
+            if len(sys.argv) == 3:
+                row_id = int(sys.argv[2])
+                if approved_benefit is not None:
+                    update_database_result(row_id, approved_benefit)
 
     except Exception as e:
         print(json.dumps({"error": f"Script execution failed: {str(e)}"}))
@@ -454,11 +492,3 @@ if __name__ == "__main__":
 # 456 -- payout limited by max benefit
 # 455 -- No coverage pest/gutter (difficult) -- current solution gives full payout
 # 449 -- No coverage for asset protection fee or utility expenses -- current solution gives full payout
-
-# flow:
-# pull from docs--identify security deposit ledger/claim itemization -- will be something enumerating something like outstanding or move out charges--potentially on a document of its own, or in another,
-# extract items with price + description
-# (should be close to claim or above claim in the case it exceeds max benefit--if not throw a warning and I guess we can default to current system(?))
-# feed items to claude with rest of files--it has to determine which items are covered, give back sum
-# return min of this sum and max benefit
-# print result and actual benefit
