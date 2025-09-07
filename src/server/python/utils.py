@@ -1,15 +1,165 @@
 import csv
-import os
 from pathlib import Path
 import base64
 import anthropic
-import json
 from mistralai import Mistral
+from estimate import MISTRAL_API_KEY, ANTHROPIC_API_KEY
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+def read_folder_contents(folder_path):
+    folder_path = Path(folder_path)
+
+    files_info = []
+
+    for file_path in folder_path.iterdir():
+        if file_path.is_file():
+            file_info = {
+                "name": file_path.name,
+                "path": str(file_path),
+                "extension": file_path.suffix.lower(),
+                "size_bytes": file_path.stat().st_size,
+            }
+            files_info.append(file_info)
+
+    return files_info
+
+
+def read_security_deposit_claims():
+    claims_dict = {}
+
+    with open(
+        "Security Deposit Claims - Security Deposit Claims.csv", "r", encoding="utf-8"
+    ) as file:
+        reader = csv.DictReader(file)
+
+        for row in reader:
+            tracking_number = row["Tracking Number"]
+            claims_dict[tracking_number] = row
+
+    return claims_dict
+
+
+def filter_claim_data_for_ai(claim_data):
+    """Remove reference answers from claim data before sending to AI"""
+    return {
+        k: v
+        for k, v in claim_data.items()
+        if k not in ["Approved Benefit Amount", "PM Explanation"]
+    }
+
+
+def encode_pdf_to_base64(pdf_path):
+    """Encode the PDF to base64."""
+    try:
+        with open(pdf_path, "rb") as pdf_file:
+            return base64.b64encode(pdf_file.read()).decode("utf-8")
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
+
+def encode_image_to_base64(image_path):
+    """Encode the image to base64."""
+    try:
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode("utf-8")
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
+
+def extract_document_content(file_path):
+    file_path = Path(file_path)
+    file_extension = file_path.suffix.lower()
+    try:
+        if file_extension == ".pdf":
+            content = _extract_pdf_content(file_path)
+            return content
+        elif file_extension in [".jpg", ".jpeg", ".png", ".tiff", ".bmp"]:
+            content = _extract_image_content(file_path)
+            return content
+        else:
+            return {"error": f"Unsupported file type: {file_extension}"}
+    except Exception as e:
+        return {"error": f"Failed to extract content: {str(e)}"}
+
+
+def _extract_pdf_content(file_path):
+    content = {
+        "title": Path(file_path).name,
+        "file_path": str(file_path),
+        "file_type": "pdf",
+        "text": "",
+    }
+
+    # Encode PDF to base64
+    base64_pdf = encode_pdf_to_base64(file_path)
+
+    try:
+        client = Mistral(api_key=MISTRAL_API_KEY)
+
+        ocr_response = client.ocr.process(
+            model="mistral-ocr-latest",
+            document={
+                "type": "document_url",
+                "document_url": f"data:application/pdf;base64,{base64_pdf}",
+            },
+            include_image_base64=True,
+        )
+
+        content["text"] = getattr(ocr_response.pages[0], "markdown", "")
+
+        return content
+
+    except Exception as e:
+        print(f"Error processing PDF {file_path}: {e}")
+        return {"error": f"Mistral OCR failed: {str(e)}"}
+
+
+def _extract_image_content(file_path):
+    content = {
+        "title": Path(file_path).name,
+        "file_path": str(file_path),
+        "file_type": "image",
+        "text": "",
+    }
+
+    base64_image = encode_image_to_base64(file_path)
+
+    try:
+        client = Mistral(api_key=MISTRAL_API_KEY)
+
+        # Determine image format for proper MIME type
+        file_extension = Path(file_path).suffix.lower()
+        mime_type_map = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".tiff": "image/tiff",
+            ".bmp": "image/bmp",
+        }
+        mime_type = mime_type_map.get(file_extension, "image/jpeg")
+
+        ocr_response = client.ocr.process(
+            model="mistral-ocr-latest",
+            document={
+                "type": "image_url",
+                "image_url": f"data:{mime_type};base64,{base64_image}",
+            },
+            include_image_base64=True,
+        )
+
+        content["text"] = getattr(ocr_response.pages[0], "markdown", "")
+
+        return content
+
+    except Exception as e:
+        print(f"Error processing image {file_path}: {e}")
+        return {"error": f"Mistral OCR failed: {str(e)}"}
 
 # backup
-def analyze_claim_backup(folder_contents, claim_data, api_key):
-    client = anthropic.Anthropic(api_key=api_key)
+def analyze_claim_backup(folder_contents, claim_data):
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     # Prepare the evidence from documents
     evidence_text = ""
@@ -82,3 +232,34 @@ RULES:
 
     except Exception as e:
         return {"error": f"API call failed: {str(e)}"}
+
+def run_unit_tests():
+    folder_numbers = [365, 373, 413, 449, 455, 456]
+    claims_dict = read_security_deposit_claims()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_folder = {
+            executor.submit(process_claim_by_folder_number, folder): folder
+            for folder in folder_numbers
+        }
+
+        for future in as_completed(future_to_folder):
+            folder = future_to_folder[future]
+            try:
+                result = future.result()
+                computed_benefit = (
+                    result.get("approved_benefit", "N/A")
+                    if isinstance(result, dict)
+                    else "N/A"
+                )
+
+                # Get reference values from CSV
+                claim_data = claims_dict.get(str(folder), {})
+                reference_benefit = claim_data.get("Approved Benefit Amount", "N/A")
+                pm_explanation = claim_data.get("PM Explanation", "N/A")
+
+                print(
+                    f"Folder {folder}: Computed=${computed_benefit} | Human=${reference_benefit} | Explan: {pm_explanation}"
+                )
+            except Exception as e:
+                print(f"Folder {folder}: Error - {e}")

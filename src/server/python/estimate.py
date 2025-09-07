@@ -1,171 +1,13 @@
-import csv
-import os
 import sys
 import json
 import math
-from pathlib import Path
-import base64
 from typing import Any, Dict
 import anthropic
-from mistralai import Mistral
-from utils import analyze_claim_backup
+from utils import analyze_claim_backup, read_security_deposit_claims, read_folder_contents, extract_document_content, run_unit_tests
 import psycopg2
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ANTHROPIC_API_KEY = "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"
 MISTRAL_API_KEY = "hnEcbqbI4cumUHOY8yew25sLjLG1Yoyb"
-
-
-def read_folder_contents(folder_path):
-    folder_path = Path(folder_path)
-
-    files_info = []
-
-    for file_path in folder_path.iterdir():
-        if file_path.is_file():
-            file_info = {
-                "name": file_path.name,
-                "path": str(file_path),
-                "extension": file_path.suffix.lower(),
-                "size_bytes": file_path.stat().st_size,
-            }
-            files_info.append(file_info)
-
-    return files_info
-
-
-def read_security_deposit_claims():
-    claims_dict = {}
-
-    with open(
-        "Security Deposit Claims - Security Deposit Claims.csv", "r", encoding="utf-8"
-    ) as file:
-        reader = csv.DictReader(file)
-
-        for row in reader:
-            tracking_number = row["Tracking Number"]
-            claims_dict[tracking_number] = row
-
-    return claims_dict
-
-
-def filter_claim_data_for_ai(claim_data):
-    """Remove reference answers from claim data before sending to AI"""
-    return {
-        k: v
-        for k, v in claim_data.items()
-        if k not in ["Approved Benefit Amount", "PM Explanation"]
-    }
-
-
-def encode_pdf_to_base64(pdf_path):
-    """Encode the PDF to base64."""
-    try:
-        with open(pdf_path, "rb") as pdf_file:
-            return base64.b64encode(pdf_file.read()).decode("utf-8")
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
-
-
-def encode_image_to_base64(image_path):
-    """Encode the image to base64."""
-    try:
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode("utf-8")
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
-
-
-def extract_document_content(file_path):
-    file_path = Path(file_path)
-    file_extension = file_path.suffix.lower()
-    try:
-        if file_extension == ".pdf":
-            content = _extract_pdf_content(file_path)
-            return content
-        elif file_extension in [".jpg", ".jpeg", ".png", ".tiff", ".bmp"]:
-            content = _extract_image_content(file_path)
-            return content
-        else:
-            return {"error": f"Unsupported file type: {file_extension}"}
-    except Exception as e:
-        return {"error": f"Failed to extract content: {str(e)}"}
-
-
-def _extract_pdf_content(file_path):
-    content = {
-        "title": Path(file_path).name,
-        "file_path": str(file_path),
-        "file_type": "pdf",
-        "text": "",
-    }
-
-    # Encode PDF to base64
-    base64_pdf = encode_pdf_to_base64(file_path)
-
-    try:
-        client = Mistral(api_key=MISTRAL_API_KEY)
-
-        ocr_response = client.ocr.process(
-            model="mistral-ocr-latest",
-            document={
-                "type": "document_url",
-                "document_url": f"data:application/pdf;base64,{base64_pdf}",
-            },
-            include_image_base64=True,
-        )
-
-        content["text"] = getattr(ocr_response.pages[0], "markdown", "")
-
-        return content
-
-    except Exception as e:
-        print(f"Error processing PDF {file_path}: {e}")
-        return {"error": f"Mistral OCR failed: {str(e)}"}
-
-
-def _extract_image_content(file_path):
-    content = {
-        "title": Path(file_path).name,
-        "file_path": str(file_path),
-        "file_type": "image",
-        "text": "",
-    }
-
-    base64_image = encode_image_to_base64(file_path)
-
-    try:
-        client = Mistral(api_key=MISTRAL_API_KEY)
-
-        # Determine image format for proper MIME type
-        file_extension = Path(file_path).suffix.lower()
-        mime_type_map = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".tiff": "image/tiff",
-            ".bmp": "image/bmp",
-        }
-        mime_type = mime_type_map.get(file_extension, "image/jpeg")
-
-        ocr_response = client.ocr.process(
-            model="mistral-ocr-latest",
-            document={
-                "type": "image_url",
-                "image_url": f"data:{mime_type};base64,{base64_image}",
-            },
-            include_image_base64=True,
-        )
-
-        content["text"] = getattr(ocr_response.pages[0], "markdown", "")
-
-        return content
-
-    except Exception as e:
-        print(f"Error processing image {file_path}: {e}")
-        return {"error": f"Mistral OCR failed: {str(e)}"}
 
 
 def analyze_individual_document_for_charges(
@@ -262,7 +104,6 @@ The document should have specific line items with costs, not just summary amount
 
 
 def analyze_document_for_monthly_rent(document_content: Dict[str, Any]) -> int | None:
-    """Extract monthly rent from a document if present."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     prompt = f"""Look for any monthly rent amount in this document.
@@ -299,10 +140,8 @@ Find any monthly rent amount mentioned (from lease agreements, rent schedules, l
         tool_use = response.content[0]
         if tool_use.type == "tool_use" and tool_use.name == "extract_monthly_rent":
             result = tool_use.input
-            if isinstance(result, dict):
-                return result.get("monthly_rent")
-        return None
-    except Exception as e:
+            result.get("monthly_rent")  # type: ignore
+    except Exception:
         return None
 
 
@@ -464,7 +303,7 @@ def process_claim_by_folder_number(folder_number):
             if (
                 total_charges >= 0.8 * claim_amount
                 and total_charges <= claim_amount * 1.2
-            ):  # There's one type of ledger which AI can't reliably parse
+            ):  # Note: there are one or two docs the AI can't reliably parse--so total_charges can be off
                 return analyze_itemized_charge_coverage(
                     charge_items, folder_contents, claim_data, monthly_rent
                 )
@@ -477,7 +316,7 @@ def process_claim_by_folder_number(folder_number):
             print(f"Error analyzing itemized charges: {e}")
             pass
 
-    return analyze_claim_backup(folder_contents, claim_data, ANTHROPIC_API_KEY)
+    return analyze_claim_backup(folder_contents, claim_data)
 
 
 def update_database_result(row_id, result_value):
@@ -500,38 +339,6 @@ def update_database_result(row_id, result_value):
         conn.close()
     except Exception as e:
         print(f"Database update failed: {e}")
-
-
-def run_unit_tests():
-    folder_numbers = [365, 373, 413, 449, 455, 456]
-    claims_dict = read_security_deposit_claims()
-
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_folder = {
-            executor.submit(process_claim_by_folder_number, folder): folder
-            for folder in folder_numbers
-        }
-
-        for future in as_completed(future_to_folder):
-            folder = future_to_folder[future]
-            try:
-                result = future.result()
-                computed_benefit = (
-                    result.get("approved_benefit", "N/A")
-                    if isinstance(result, dict)
-                    else "N/A"
-                )
-
-                # Get reference values from CSV
-                claim_data = claims_dict.get(str(folder), {})
-                reference_benefit = claim_data.get("Approved Benefit Amount", "N/A")
-                pm_explanation = claim_data.get("PM Explanation", "N/A")
-
-                print(
-                    f"Folder {folder}: Computed=${computed_benefit} | Human=${reference_benefit} | Explan: {pm_explanation}"
-                )
-            except Exception as e:
-                print(f"Folder {folder}: Error - {e}")
 
 
 if __name__ == "__main__":
@@ -586,3 +393,4 @@ if __name__ == "__main__":
 # 726 -- gives full payout (can't read itemized doc--will payout full)
 # 727 -- partial excluding fees (good)
 # 757 -- normal full payout (good)
+# 705 -- cap on monthly rent (good)
