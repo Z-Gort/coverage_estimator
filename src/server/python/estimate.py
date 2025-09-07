@@ -188,7 +188,7 @@ Look for things like:
 - Damage charges
 - Fee breakdowns
 
-The document should have specific line items with costs, not just summary amounts."""
+The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't neccessarily showing oustanding costs."""
 
     try:
         response = client.messages.create(
@@ -270,7 +270,15 @@ ITEMIZED CHARGES TO ANALYZE:
 SUPPORTING DOCUMENTS:
 {evidence_text}
 
-For each charge in order, determine if it's covered by insurance or solely tenant responsibility based on lease terms and other related evidence."""
+For each charge in order, determine if it's covered by insurance by analyzing the documents and following the given decision rules.
+
+RULES:
+--Any document explicitly stating claim rules OVERRIDE these general guidelines.
+--Repairs, maintenance, loss of rent due to inhability, are generally covered.
+--Admin/other fees, utilities, pet incurred damages, are generlly not covered.
+--When in doubt, allow the charge to be covered.
+
+"""
 
     try:
         response = client.messages.create(
