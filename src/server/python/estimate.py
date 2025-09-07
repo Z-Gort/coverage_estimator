@@ -124,8 +124,6 @@ def _extract_pdf_content(file_path):
         print(f"Error processing PDF {file_path}: {e}")
         return {"error": f"Mistral OCR failed: {str(e)}"}
 
-    return content
-
 
 def _extract_image_content(file_path):
     content = {
@@ -198,9 +196,6 @@ Look for things like:
 RULES:
 --ONLY include charges which are outstanding at move-out/still due. NOT charges that were already paid.
 --If document shows both paid and unpaid items, look for "balance due" and include ONLY items contributing to that balance.
-
-SPECIAL CASE - Ledger Documents:
---If document name contains "ledger" AND shows "balance due": charges after the last rent payment are typically the outstanding items we want.
 
 The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't neccessarily showing oustanding costs."""
 
@@ -288,8 +283,8 @@ For each charge in order, determine if it's covered by insurance by analyzing th
 
 RULES:
 --Any document explicitly stating claim rules OVERRIDE these general guidelines.
---Repairs, maintenance, loss of rent due to inhability, are generally covered.
---Admin/other fees, utilities, pet incurred damages, are generlly not covered.
+--Repairs, maintenance, cleaning/carpet cleaning,loss of rent due to inhability, reletting fees, are generally covered.
+--Admin/other fees (EXCEPT for reletting fees), utilities, pet incurred damages, pest control, gutter cleaning, are generlly not covered.
 --When in doubt, allow the charge to be covered.
 
 """
@@ -374,8 +369,8 @@ def process_claim_by_folder_number(folder_number):
 
     for file_info in folder_info:
         content = extract_document_content(file_info["path"])
-        print(f"Content: {content["text"][:20]}")
         if "error" not in content:
+            print(f"Content: {content["text"][:20]}")
             folder_contents.append(content)
 
             if not found_itemized_doc:
@@ -384,6 +379,9 @@ def process_claim_by_folder_number(folder_number):
                 if charge_analysis.get("has_itemized_charges"):
                     charge_items = charge_analysis.get("charge_items", [])
                     found_itemized_doc = True
+        else:
+            print(f"Error extracting {file_info['path']}: {content['error']}")
+            continue
 
     if found_itemized_doc:
         total_charges = sum(item["cost"] for item in charge_items)
@@ -463,6 +461,7 @@ def run_unit_tests():
             except Exception as e:
                 print(f"Folder {folder}: Error - {e}")
 
+
 if __name__ == "__main__":
     try:
         if len(sys.argv) > 1 and sys.argv[1] == "unit":
@@ -483,12 +482,34 @@ if __name__ == "__main__":
                     update_database_result(row_id, approved_benefit)
 
     except Exception as e:
-        print(json.dumps({"error": f"Script execution failed: {str(e)}"}))
+        import traceback
+
+        # Get detailed error information
+        error_details = {
+            "error": f"Script execution failed: {str(e)}",
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc(),
+            "line_number": (
+                traceback.extract_tb(e.__traceback__)[-1].lineno
+                if e.__traceback__
+                else None
+            ),
+            "filename": (
+                traceback.extract_tb(e.__traceback__)[-1].filename
+                if e.__traceback__
+                else None
+            ),
+        }
+
+        print(json.dumps(error_details, indent=2))
         sys.exit(1)
 
-# 365 -- partial payout, no coverage income HOA violations, covering property damages only
-# 373 -- normal full payout
-# 413 -- partial payout excluding tenant fees
-# 456 -- payout limited by max benefit
-# 455 -- No coverage pest/gutter (difficult) -- current solution gives full payout
-# 449 -- No coverage for asset protection fee or utility expenses -- current solution gives full payout
+# 365 -- partial payout, no coverage income HOA violations, covering property damages only (can't read itemized doc--will payout full)
+# 373 -- normal full payout (good)
+# 413 -- partial payout excluding tenant fees (good)
+# 418 -- partial--excludes fees (good)
+# 456 -- payout limited by max benefit (good)
+# 455 -- No coverage pest/gutter (difficult) -- (good)
+# 449 -- No coverage for asset protection fee or utility expenses -- (good)
+# 726 -- gives full payout (can't read itemized doc--will payout full)
+# 757 -- normal full payout (good)
