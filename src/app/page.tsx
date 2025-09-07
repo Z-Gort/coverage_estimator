@@ -9,8 +9,12 @@ import { Input } from "~/components/ui/input";
 export default function Home() {
   const [inputValue, setInputValue] = useState("");
 
-  const { data: latestResult, refetch } =
-    api.estimate.getLatestResult.useQuery();
+  const { data: latestResult, refetch } = api.estimate.getLatestResult.useQuery(
+    undefined,
+    {
+      refetchInterval: 5000, // Poll every 5 seconds
+    },
+  );
   const createMutation = api.estimate.create.useMutation();
 
   const handleEstimateBenefit = async () => {
