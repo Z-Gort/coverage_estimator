@@ -172,6 +172,9 @@ def analyze_individual_document_for_charges(
 
     prompt = f"""Analyze this document to determine if it contains itemized move-out charges, security deposit charges, or outstanding charges from a rental property.
 
+TITLE:
+{document_content.get('title', '')}
+
 DOCUMENT CONTENT:
 {document_content.get('text', '')}
 
@@ -187,6 +190,13 @@ Look for things like:
 - Repair/cleaning costs
 - Damage charges
 - Fee breakdowns
+
+RULES:
+--ONLY include charges which are outstanding at move-out/still due. NOT charges that were already paid.
+--If document shows both paid and unpaid items, look for "balance due" and include ONLY items contributing to that balance.
+
+SPECIAL CASE - Ledger Documents:
+--If document name contains "ledger" AND shows "balance due": charges after the last rent payment are typically the outstanding items we want.
 
 The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't neccessarily showing oustanding costs."""
 
@@ -376,16 +386,18 @@ def process_claim_by_folder_number(folder_number):
         claim_amount_str = (
             claim_data.get("Amount of Claim").replace("$", "").replace(",", "")  # type: ignore
         )
-        print(f"Found itemized doc, total charges: {total_charges}, claim amount: {claim_amount_str}")
+        print(
+            f"Found itemized doc, total charges: {total_charges}, claim amount: {claim_amount_str}"
+        )
         try:
             claim_amount = int(float(claim_amount_str))
-            if total_charges >= 0.8 * claim_amount:
+            if total_charges >= 0.8 * claim_amount and total_charges <= claim_amount * 1.2: #There's one type of ledger which AI can't reliably parse
                 return analyze_itemized_charge_coverage(
                     charge_items, folder_contents, claim_data
                 )
             else:
                 print(
-                    f"Total charges {total_charges} are less than 80% of claim amount {claim_amount}. Moving to backup."
+                    f"Total charges {total_charges} are not close to {claim_amount}. Moving to backup."
                 )
                 pass
         except Exception as e:
@@ -436,7 +448,7 @@ if __name__ == "__main__":
         print(json.dumps({"error": f"Script execution failed: {str(e)}"}))
         sys.exit(1)
 
-# 365 -- partial payout (a few uncovered items in ledger)
+# 365 -- partial payout, no coverage income HOA violations, covering property damages only
 # 373 -- normal full payout
 # 413 -- partial payout excluding tenant fees
 # 456 -- payout limited by max benefit

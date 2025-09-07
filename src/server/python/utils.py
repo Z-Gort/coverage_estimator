@@ -41,8 +41,8 @@ RULES:
 -- The approved benefit will be between 0 and the minimum of the max benefit and the amount of claim.
 -- The tenant is likely paying the security deposit monthly--that is ok! Do not consider this in your decision.
 -- When in doubt, tend to trust the claim and lean toward approving reasonable amounts
--- IMPORTANT: A key element in determining what will be covered or not is understanding what items are covered by the insurer and which are solely the responsibility of the tenant.
-e.g. Tenant fees, damages past the end of coverage date, etc... are not covered by the insurer. Rule of thumb is if lease paragraph allowing the charge --> tenenat responsibility.
+-- Repairs, maintenance, loss of rent due to inhability, are generally covered.
+-- Admin/other fees, utilities, pet incurred damages, are generlly not covered.
 """
 
     try:
