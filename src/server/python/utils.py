@@ -4,6 +4,7 @@ import base64
 import anthropic
 from mistralai import Mistral
 import psycopg2
+import math
 
 # API Keys
 ANTHROPIC_API_KEY = "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"
@@ -184,78 +185,18 @@ def _extract_image_content(file_path):
         return {"error": f"Mistral OCR failed: {str(e)}"}
 
 
-# backup
-def analyze_claim_backup(folder_contents, claim_data):
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+def calculate_monthly_rent_ceiling(monthly_rent: int) -> int:
+    """Calculate monthly rent ceiling rounded up to nearest $500"""
+    return math.ceil(monthly_rent / 500) * 500
 
-    # Prepare the evidence from documents
-    evidence_text = ""
-    for doc in folder_contents:
-        evidence_text += f"\n--- {doc['title']} ---\n"
-        evidence_text += doc["text"]
 
-    # Create the analysis prompt
-    prompt = f"""You are analyzing a security deposit claim. Here is the key information:
-
-CLAIM DETAILS:
-
-MOST IMPORTANT:
-- Max Benefit: {claim_data.get('Max Benefit', 'Not specified')}
-- Amount of Claim: {claim_data.get('Amount of Claim', 'Not specified')}
-OTHER INFORMATION:
-- Monthly Rent: {claim_data.get('Monthly Rent', 'Not specified')}
-- Lease Address: {claim_data.get('Lease Street Address', 'Not specified')}
-- Lease Dates: {claim_data.get('Lease Start Date', 'Not specified')} to {claim_data.get('Lease End Date', 'Not specified')}
-- Move-Out Date: {claim_data.get('Move-Out Date', 'Not specified')}
-- Termination Type: {claim_data.get('Termination Type', 'Not specified')}
-
-EVIDENCE FROM DOCUMENTS:
-{evidence_text}
-
-Please analyze this claim and determine the approved benefit amount along with your reasoning based on the following rules.
-
-RULES:
--- The approved benefit will be between 0 and the minimum of the max benefit and the amount of claim.
--- The tenant is likely paying the security deposit monthly--that is ok! Do not consider this in your decision.
--- When in doubt, tend to trust the claim and lean toward approving reasonable amounts
--- Repairs, maintenance, loss of rent due to inhability, are generally covered.
--- Admin/other fees, utilities, pet incurred damages, are generlly not covered.
-"""
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}],
-            tools=[
-                {
-                    "name": "submit_claim_analysis",
-                    "description": "Submit the final claim analysis with approved benefit amount and reasoning",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "approved_benefit": {
-                                "type": "integer",
-                                "description": "The approved benefit amount in dollars (no cents, whole number only)",
-                            },
-                            "reasoning": {
-                                "type": "string",
-                                "description": "Detailed explanation of the decision including analysis of evidence and factors considered",
-                            },
-                        },
-                        "required": ["approved_benefit", "reasoning"],
-                    },
-                }
-            ],
-            tool_choice={"type": "tool", "name": "submit_claim_analysis"},
-        )
-
-        # Extract the structured output
-        tool_use = response.content[0]
-        if tool_use.type == "tool_use" and tool_use.name == "submit_claim_analysis":
-            return tool_use.input
-        else:
-            return {"error": "Unexpected response format from Anthropic API"}
-
-    except Exception as e:
-        return {"error": f"API call failed: {str(e)}"}
+def calculate_approved_benefit(
+    covered_amount: int, max_benefit: int, monthly_rent: int | None = None
+) -> int:
+    """Calculate approved benefit considering max benefit and optional monthly rent ceiling"""
+    print(f"Calculating approved benefit for covered amount: {covered_amount}, max benefit: {max_benefit}, monthly rent: {monthly_rent}")
+    if monthly_rent:
+        monthly_rent_ceiling = calculate_monthly_rent_ceiling(monthly_rent)
+        return min(covered_amount, max_benefit, monthly_rent_ceiling)
+    else:
+        return min(covered_amount, max_benefit)

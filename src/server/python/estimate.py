@@ -1,16 +1,14 @@
 import sys
 import json
-import math
 from typing import Any, Dict
 import anthropic
 from utils import (
-    analyze_claim_backup,
     read_security_deposit_claims,
     read_folder_contents,
     extract_document_content,
     update_database_result,
     ANTHROPIC_API_KEY,
-    MISTRAL_API_KEY,
+    calculate_approved_benefit,
 )
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -143,9 +141,18 @@ Find any monthly rent amount mentioned (from lease agreements, rent schedules, l
         )
 
         tool_use = response.content[0]
+        print(f"Monthly rent tool use: {tool_use}")
         if tool_use.type == "tool_use" and tool_use.name == "extract_monthly_rent":
-            result = tool_use.input
-            result.get("monthly_rent")  # type: ignore
+            result = tool_use.input  # type: ignore
+            monthly_rent = result.get("monthly_rent")  # type: ignore
+            # Handle cases where AI returns string "null" instead of None
+            if monthly_rent == "null" or monthly_rent is None:
+                return None
+            # Ensure we return an integer if it's a valid number
+            try:
+                return int(monthly_rent)
+            except (ValueError, TypeError):
+                return None
     except Exception:
         return None
 
@@ -239,12 +246,9 @@ RULES:
             )
             max_benefit = int(float(max_benefit_str))
 
-            # Apply monthly rent ceiling if available (rounded up to nearest $500)
-            if monthly_rent:
-                monthly_rent_ceiling = math.ceil(monthly_rent / 500) * 500
-                approved_benefit = min(total_covered, max_benefit, monthly_rent_ceiling)
-            else:
-                approved_benefit = min(total_covered, max_benefit)
+            approved_benefit = calculate_approved_benefit(
+                total_covered, max_benefit, monthly_rent
+            )
 
             return {
                 "approved_benefit": approved_benefit,
@@ -321,7 +325,16 @@ def process_claim_by_folder_number(folder_number):
             print(f"Error analyzing itemized charges: {e}")
             pass
 
-    return analyze_claim_backup(folder_contents, claim_data)
+    max_benefit_str = (
+        claim_data.get("Max Benefit").replace("$", "").replace(",", "")  # type: ignore
+    )
+    max_benefit = int(float(max_benefit_str))
+
+    return {
+        "approved_benefit": calculate_approved_benefit(
+            max_benefit, max_benefit, monthly_rent
+        )
+    }
 
 
 def run_unit_tests():
@@ -408,4 +421,5 @@ if __name__ == "__main__":
 # 726 -- gives full payout (can't read itemized doc--will payout full)
 # 727 -- partial excluding fees (good)
 # 757 -- normal full payout (good)
-# 705 -- cap on monthly rent (good)
+# 703 -- constrained by monthly rent
+# 705 -- constrained by montly rent (good)
