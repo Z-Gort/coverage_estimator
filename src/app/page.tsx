@@ -9,12 +9,18 @@ import { Input } from "~/components/ui/input";
 export default function Home() {
   const [inputValue, setInputValue] = useState("");
 
-  const { data: latestResult, refetch } = api.post.getLatestResult.useQuery();
-  const createMutation = api.post.create.useMutation();
+  const { data: latestResult, refetch } =
+    api.estimate.getLatestResult.useQuery();
+  const createMutation = api.estimate.create.useMutation();
 
   const handleEstimateBenefit = async () => {
     try {
-      await createMutation.mutateAsync();
+      const numericInput = Number(inputValue);
+      if (isNaN(numericInput)) {
+        console.error("Please enter a valid number");
+        return;
+      }
+      await createMutation.mutateAsync({ input: numericInput });
       await refetch();
     } catch (error) {
       console.error("Error creating row:", error);
