@@ -24,8 +24,8 @@ export const estimateRouter = createTRPCRouter({
         path.join(process.cwd(), "src/server/python/venv/bin/python"),
         [
           path.join(process.cwd(), "src/server/python/estimate.py"),
-          rowId.toString(),
           input.input.toString(),
+          rowId.toString(),
         ],
         {
           cwd: path.join(process.cwd(), "src/server/python"),
