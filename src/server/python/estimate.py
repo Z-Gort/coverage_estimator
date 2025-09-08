@@ -184,27 +184,10 @@ def analyze_itemized_charge_coverage(charge_items, claim_data, monthly_rent=None
             )
             charge_items = filtered_charge_items
 
-    # If no charge items remain after filtering, use backup calculation
+    print(f"AFTER FILTERING: {charge_items}")
+    # If no charge items remain after filtering, return error to use backup calculation
     if not charge_items:
-        print("No charge items remaining after filtering, using backup calculation")
-        max_benefit_str = (
-            claim_data.get("Max Benefit").replace("$", "").replace(",", "")  # type: ignore
-        )
-        max_benefit = int(float(max_benefit_str))
-
-        requested_claim_str = (
-            claim_data.get("Amount of Claim").replace("$", "").replace(",", "")  # type: ignore
-        )
-        requested_claim = int(float(requested_claim_str))
-
-        approved_benefit = calculate_approved_benefit(
-            max_benefit, max_benefit, requested_claim, monthly_rent, claim_data
-        )
-
-        return {
-            "approved_benefit": approved_benefit,
-            "coverage_decisions": [],
-        }
+        return {"error": "No charge items remaining after filtering"}
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -270,6 +253,8 @@ RULES:
         tool_use = response.content[0]
         if tool_use.type == "tool_use" and tool_use.name == "submit_coverage_analysis":
             result = tool_use.input
+            if not result:
+                return {"error": "No input data from API, using backup calculation"}
             coverage_decisions = result.get("coverage_decisions")  # type: ignore
 
             # Sum covered charges
@@ -373,9 +358,11 @@ def process_claim_by_folder_number(folder_number):
             if (
                 total_charges >= 0.8 * claim_amount
             ):  # Note: there are one or two docs the AI can't reliably parse--so total_charges can be off.
-                return analyze_itemized_charge_coverage(
+                result = analyze_itemized_charge_coverage(
                     charge_items, claim_data, monthly_rent
                 )
+                if "error" not in result:
+                    return result
             else:
                 print(
                     f"Total charges {total_charges} are not close to {claim_amount}. Moving to backup."
