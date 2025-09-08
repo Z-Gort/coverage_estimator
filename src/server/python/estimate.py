@@ -259,28 +259,43 @@ def process_claim_by_folder_number(folder_number):
     folder_info = read_folder_contents(str(folder_number))
     charge_items = []
     found_itemized_doc = False
+    best_diff = float("inf")
+
+    claim_amount_str = (
+        claim_data.get("Amount of Claim").replace("$", "").replace(",", "")  # type: ignore
+    )
+    claim_amount = int(float(claim_amount_str))
 
     for file_info in folder_info:
         # Analyze document with OCR for charges only
         charge_analysis = analyze_individual_document_for_charges_ocr(file_info["path"])
         print(f"Charge analysis: {charge_analysis}")
 
-        # Check for itemized charges if not found yet
-        if not found_itemized_doc and charge_analysis.get("has_itemized_charges"):
-            charge_items = charge_analysis.get("charge_items", [])
-            found_itemized_doc = True
-            break
+        # Check for itemized charges
+        if charge_analysis.get("has_itemized_charges"):
+            current_charge_items = charge_analysis.get("charge_items", [])
+            current_total = sum(item["cost"] for item in current_charge_items)
+
+            # Optimization--look for best itemized charges
+            if claim_amount:
+                current_diff = abs(current_total - claim_amount)
+                if current_diff < best_diff:
+                    charge_items = current_charge_items
+                    found_itemized_doc = True
+                    best_diff = current_diff
+                    print(
+                        f"New best match: total ${current_total}, diff ${current_diff}"
+                    )
+            elif not found_itemized_doc:
+                charge_items = current_charge_items
+                found_itemized_doc = True
 
     if found_itemized_doc:
         total_charges = sum(item["cost"] for item in charge_items)
-        claim_amount_str = (
-            claim_data.get("Amount of Claim").replace("$", "").replace(",", "")  # type: ignore
-        )
         print(
-            f"Found itemized doc, total charges: {total_charges}, claim amount: {claim_amount_str}"
+            f"Found itemized doc, total charges: {total_charges}, claim amount: {claim_amount}"
         )
-        try:
-            claim_amount = int(float(claim_amount_str))
+        if claim_amount is not None:
             if (
                 total_charges >= 0.8 * claim_amount
             ):  # Note: there are one or two docs the AI can't reliably parse--so total_charges can be off.
@@ -291,9 +306,8 @@ def process_claim_by_folder_number(folder_number):
                 print(
                     f"Total charges {total_charges} are not close to {claim_amount}. Moving to backup."
                 )
-                pass
-        except Exception as e:
-            print(f"Error analyzing itemized charges: {e}")
+        else:
+            print(f"Error parsing claim amount, moving to backup.")
             pass
 
     max_benefit_str = (
@@ -407,14 +421,13 @@ if __name__ == "__main__":
 # 456 -- payout limited by max benefit -- (correct)
 # 703 -- constrained by monthly rent  --(correct)
 # 705 -- constrained by montly rent --(correct)
-# 726 -- gives full payout
-# 728 -- partial excluding fees
-# 757 -- normal full payout
+# 726 -- gives full payout -- (can't read--error not too bad))
+# 728 -- partial excluding fees -- (correct)
+# 757 -- normal full payout (no--substantial error--reletting covered in this case, isn't in others...)
 
 # PRIORITIES:
 # go through and use all notes to make not-covered list--also improve prompt syntax for claude
 # lease/security deposit deadline coverage cases
-# best itemization optimization
 
 #  Pushed off:
 # figure out monthly rent cap
