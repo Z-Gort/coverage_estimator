@@ -7,9 +7,11 @@ from utils import (
     read_security_deposit_claims,
     read_folder_contents,
     extract_document_content,
+    update_database_result,
     ANTHROPIC_API_KEY,
     calculate_approved_benefit,
 )
+
 
 def analyze_individual_document_for_charges(
     document_content: Dict[str, Any],
@@ -336,62 +338,68 @@ def process_claim_by_folder_number(folder_number):
     }
 
 
-def process_claims_batch(folder_numbers):
-    results = []
+def process_claims_batch(folder_numbers, row_id=None):
+    result_list = []
     claims_dict = read_security_deposit_claims()
 
     for i, folder_number in enumerate(folder_numbers):
         try:
-            result = process_claim_by_folder_number(folder_number)
-            print("FOLDER_NUMBER: ", folder_number, json.dumps(results, indent=2))
-
             claim_data = claims_dict.get(str(folder_number))
-
-            ai_approved_benefit = result.get("approved_benefit") if result else None
-            actual_approved_benefit = (
-                claim_data.get("Approved Benefit Amount") if claim_data else None
+            if (
+                not claim_data
+                or not claim_data["Approved Benefit Amount"]
+                or not claim_data["Amount of Claim"]
+            ):
+                print("Invalid row: ", folder_number)
+                continue
+            result = process_claim_by_folder_number(folder_number)
+            print(
+                "Result for folder ", folder_number, ": ", json.dumps(result, indent=2)
+            )
+            ai_approved_benefit = result.get("approved_benefit") if result else 0
+            actual_approved_benefit_str = (
+                claim_data.get("Approved Benefit Amount") if claim_data else "$0"
+            )
+            actual_approved_benefit = int(
+                float(actual_approved_benefit_str.replace("$", "").replace(",", ""))
             )
             pm_explanation = claim_data.get("PM Explanation") if claim_data else None
 
             print(
-                f"Folder {folder_number}: AI=${ai_approved_benefit}, Actual={actual_approved_benefit}, PM={pm_explanation}"
+                f"Folder {folder_number}: AI=${ai_approved_benefit}, Actual=${actual_approved_benefit}, PM={pm_explanation}"
             )
 
-            results.append(
-                {"folder_number": folder_number, "result": result, "success": True}
+            result_list.extend(
+                [folder_number, ai_approved_benefit, actual_approved_benefit]
             )
+
         except Exception as e:
-            results.append(
-                {
-                    "folder_number": folder_number,
-                    "result": None,
-                    "success": False,
-                    "error": str(e),
-                }
-            )
+            print(f"Error processing folder {folder_number}: {str(e)}")
 
         if i < len(folder_numbers) - 1:
             time.sleep(10)
 
-    return results
+    if row_id:
+        update_database_result(row_id, result_list)
 
 
 if __name__ == "__main__":
     try:
-        folder_numbers_str = sys.argv[1]
-        folder_numbers = [int(num.strip()) for num in folder_numbers_str.split(",")]
-
-        results = process_claims_batch(folder_numbers)
-        print(json.dumps(results, indent=2))
+        print("starting python script")
+        if len(sys.argv) == 3:
+            # Called from estimate.ts: row_id, folder_numbers_str
+            row_id = int(sys.argv[1])
+            folder_numbers_str = sys.argv[2]
+            folder_numbers = [int(num.strip()) for num in folder_numbers_str.split(",")]
+            process_claims_batch(folder_numbers, row_id)
+        else:
+            # Local testing: just folder_numbers_str
+            folder_numbers_str = sys.argv[1]
+            folder_numbers = [int(num.strip()) for num in folder_numbers_str.split(",")]
+            process_claims_batch(folder_numbers)
 
     except Exception as e:
-        import traceback
-
-        error_details = {
-            "error": f"Script failed: {str(e)}",
-            "traceback": traceback.format_exc(),
-        }
-        print(json.dumps(error_details, indent=2))
+        print(f"Script failed: {str(e)}")
         sys.exit(1)
 
 # 365 -- partial payout, no coverage income HOA violations, covering property damages only (can't read itemized doc--will payout full)
