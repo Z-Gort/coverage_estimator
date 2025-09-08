@@ -6,11 +6,115 @@ import psycopg2
 import math
 from PyPDF2 import PdfReader, PdfWriter
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
+from mistralai import Mistral, DocumentURLChunk
+from mistralai.extra import response_format_from_pydantic_model
+import tempfile
+import os
+from dynamic_analysis import create_analysis_class
+import json
 
 # API Keys
 ANTHROPIC_API_KEY = "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"
 MISTRAL_API_KEY = "hnEcbqbI4cumUHOY8yew25sLjLG1Yoyb"
+
+
+def analyze_individual_document_for_charges_ocr(
+    file_path: str, custom_analysis_class=None
+) -> Dict[str, Any]:
+    """Analyze document using Mistral OCR with document annotations."""
+    temp_pdf_path = None
+    try:
+        file_path_obj = Path(file_path)
+        file_extension = file_path_obj.suffix.lower()
+
+        # Clip PDF if >8 pages
+        pdf_to_process = file_path
+        if file_extension == ".pdf" and count_pdf_pages(file_path) > 8:
+            temp_fd, temp_pdf_path = tempfile.mkstemp(suffix=".pdf", prefix="clipped_")
+            os.close(temp_fd)
+            pdf_to_process = temp_pdf_path
+            clip_pdf_to_pages(file_path, pdf_to_process, max_pages=8)
+
+        # Encode to base64
+        if file_extension == ".pdf":
+            base64_data = encode_pdf_to_base64(pdf_to_process)
+            document_url = f"data:application/pdf;base64,{base64_data}"
+        elif file_extension in [".jpg", ".jpeg", ".png", ".tiff", ".bmp"]:
+            with open(file_path, "rb") as f:
+                import base64
+
+                base64_data = base64.b64encode(f.read()).decode("utf-8")
+            mime_type = (
+                f"image/{file_extension[1:]}"
+                if file_extension != ".jpg"
+                else "image/jpeg"
+            )
+            document_url = f"data:{mime_type};base64,{base64_data}"
+        elif file_extension == ".docx":
+            with open(file_path, "rb") as f:
+                import base64
+
+                base64_data = base64.b64encode(f.read()).decode("utf-8")
+            document_url = f"data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{base64_data}"
+        else:
+            return {
+                "has_itemized_charges": False,
+                "charge_items": [],
+                "error": f"Unsupported file type",
+            }
+
+        # Process with Mistral OCR
+        client = Mistral(api_key=MISTRAL_API_KEY)
+        response = client.ocr.process(
+            model="mistral-ocr-latest",
+            document=DocumentURLChunk(document_url=document_url),
+            document_annotation_format=response_format_from_pydantic_model(
+                create_analysis_class()
+                if not custom_analysis_class
+                else custom_analysis_class
+            ),
+            include_image_base64=True,
+        )
+
+        # Extract annotation data
+        annotation_data = getattr(response, "document_annotation", None)
+        if isinstance(annotation_data, str):
+            annotation_data = json.loads(annotation_data)
+
+        if annotation_data:
+            charge_items = [
+                {
+                    "cost": int(item["cost"]),
+                    "description": str(item["description"]),
+                    "date": item.get("date"),  # Include optional date
+                    "is_rent": item.get("is_rent", False),  # Include is_rent field
+                }
+                for item in annotation_data.get("charge_items", [])
+            ]
+            return {
+                "has_itemized_charges": bool(
+                    annotation_data.get("has_itemized_charges", False)
+                ),
+                "charge_items": charge_items,
+            }
+        else:
+            return {
+                "has_itemized_charges": False,
+                "charge_items": [],
+                "error": "No annotation data found",
+            }
+
+    except Exception as e:
+        return {
+            "has_itemized_charges": False,
+            "charge_items": [],
+            "error": f"OCR failed: {str(e)}",
+        }
+    finally:
+        # Clean up temporary PDF file
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.unlink(temp_pdf_path)
 
 
 def count_pdf_pages(file_path: str) -> int:
@@ -161,11 +265,10 @@ def parse_date_string(date_str: str) -> Optional[datetime]:
     return None
 
 
-def process_default_charge_analysis(
+def get_charge_items(
     folder_info,
     claim_amount,
-    create_analysis_class,
-    analyze_individual_document_for_charges_ocr,
+    claim_data,
 ):
     charge_items = []
     found_itemized_doc = False
@@ -173,9 +276,24 @@ def process_default_charge_analysis(
 
     for file_info in folder_info:
         # Analyze document with OCR for charges only
-        charge_analysis = analyze_individual_document_for_charges_ocr(
-            file_info["path"], create_analysis_class()
-        )
+        if claim_data.get("Property Management Company", "") == "Excalibur Homes" and (
+            "ledger" in file_info["path"].lower()
+            or "statement" in file_info["path"].lower()
+        ):
+            charge_analysis = analyze_individual_document_for_charges_ocr(
+                file_info["path"], create_analysis_class("Excalibur Homes")
+            )
+        elif (
+            claim_data.get("Property Management Company", "") == "Pure Operating LLC"
+            and "ledger" in file_info["path"].lower()
+        ):
+            charge_analysis = analyze_individual_document_for_charges_ocr(
+                file_info["path"], create_analysis_class("Pure Operating LLC")
+            )
+        else:
+            charge_analysis = analyze_individual_document_for_charges_ocr(
+                file_info["path"], create_analysis_class()
+            )
 
         # Check for itemized charges
         if charge_analysis.get("has_itemized_charges"):

@@ -1,125 +1,16 @@
 import sys
 import json
-import os
-import tempfile
-from typing import Any, Dict, Optional
 from pathlib import Path
 import anthropic
-from pydantic import BaseModel
-from mistralai import Mistral, DocumentURLChunk
-from mistralai.extra import response_format_from_pydantic_model
 from utils import (
     read_security_deposit_claims,
     read_folder_contents,
     update_database_result,
     ANTHROPIC_API_KEY,
-    MISTRAL_API_KEY,
     calculate_approved_benefit,
-    encode_pdf_to_base64,
-    count_pdf_pages,
-    clip_pdf_to_pages,
     parse_date_string,
-    process_default_charge_analysis,
+    get_charge_items,
 )
-from dynamic_analysis import create_analysis_class
-
-
-def analyze_individual_document_for_charges_ocr(
-    file_path: str, custom_analysis_class=None
-) -> Dict[str, Any]:
-    """Analyze document using Mistral OCR with document annotations."""
-    temp_pdf_path = None
-    try:
-        file_path_obj = Path(file_path)
-        file_extension = file_path_obj.suffix.lower()
-
-        # Clip PDF if >8 pages
-        pdf_to_process = file_path
-        if file_extension == ".pdf" and count_pdf_pages(file_path) > 8:
-            temp_fd, temp_pdf_path = tempfile.mkstemp(suffix=".pdf", prefix="clipped_")
-            os.close(temp_fd)
-            pdf_to_process = temp_pdf_path
-            clip_pdf_to_pages(file_path, pdf_to_process, max_pages=8)
-
-        # Encode to base64
-        if file_extension == ".pdf":
-            base64_data = encode_pdf_to_base64(pdf_to_process)
-            document_url = f"data:application/pdf;base64,{base64_data}"
-        elif file_extension in [".jpg", ".jpeg", ".png", ".tiff", ".bmp"]:
-            with open(file_path, "rb") as f:
-                import base64
-
-                base64_data = base64.b64encode(f.read()).decode("utf-8")
-            mime_type = (
-                f"image/{file_extension[1:]}"
-                if file_extension != ".jpg"
-                else "image/jpeg"
-            )
-            document_url = f"data:{mime_type};base64,{base64_data}"
-        elif file_extension == ".docx":
-            with open(file_path, "rb") as f:
-                import base64
-
-                base64_data = base64.b64encode(f.read()).decode("utf-8")
-            document_url = f"data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{base64_data}"
-        else:
-            return {
-                "has_itemized_charges": False,
-                "charge_items": [],
-                "error": f"Unsupported file type",
-            }
-
-        # Process with Mistral OCR
-        client = Mistral(api_key=MISTRAL_API_KEY)
-        response = client.ocr.process(
-            model="mistral-ocr-latest",
-            document=DocumentURLChunk(document_url=document_url),
-            document_annotation_format=response_format_from_pydantic_model(
-                create_analysis_class()
-                if not custom_analysis_class
-                else custom_analysis_class
-            ),
-            include_image_base64=True,
-        )
-
-        # Extract annotation data
-        annotation_data = getattr(response, "document_annotation", None)
-        if isinstance(annotation_data, str):
-            annotation_data = json.loads(annotation_data)
-
-        if annotation_data:
-            charge_items = [
-                {
-                    "cost": int(item["cost"]),
-                    "description": str(item["description"]),
-                    "date": item.get("date"),  # Include optional date
-                    "is_rent": item.get("is_rent", False),  # Include is_rent field
-                }
-                for item in annotation_data.get("charge_items", [])
-            ]
-            return {
-                "has_itemized_charges": bool(
-                    annotation_data.get("has_itemized_charges", False)
-                ),
-                "charge_items": charge_items,
-            }
-        else:
-            return {
-                "has_itemized_charges": False,
-                "charge_items": [],
-                "error": "No annotation data found",
-            }
-
-    except Exception as e:
-        return {
-            "has_itemized_charges": False,
-            "charge_items": [],
-            "error": f"OCR failed: {str(e)}",
-        }
-    finally:
-        # Clean up temporary PDF file
-        if temp_pdf_path and os.path.exists(temp_pdf_path):
-            os.unlink(temp_pdf_path)
 
 
 def analyze_itemized_charge_coverage(charge_items, claim_data, monthly_rent=None):
@@ -284,34 +175,11 @@ def process_claim_by_folder_number(folder_number):
     )
     claim_amount = int(float(claim_amount_str))
 
-    # Process charge items based on property management company
-    if claim_data.get("Property Management Company", "") == "Excalibur Homes":
-        charge_items = []
-        found_itemized_doc = False
-        for file_info in folder_info:
-            if "ledger" in file_info["path"].lower():
-                charge_analysis = analyze_individual_document_for_charges_ocr(
-                    file_info["path"], create_analysis_class("Excalibur Homes")
-                )
-                charge_items = charge_analysis.get("charge_items", [])
-                found_itemized_doc = True
-    elif claim_data.get("Property Management Company", "") == "Pure Operating LLC":
-        charge_items = []
-        found_itemized_doc = False
-        for file_info in folder_info:
-            if "ledger" in file_info["path"].lower():
-                charge_analysis = analyze_individual_document_for_charges_ocr(
-                    file_info["path"], create_analysis_class("Pure Operating LLC")
-                )
-                charge_items = charge_analysis.get("charge_items", [])
-                found_itemized_doc = True
-    else:
-        charge_items, found_itemized_doc = process_default_charge_analysis(
-            folder_info,
-            claim_amount,
-            create_analysis_class,
-            analyze_individual_document_for_charges_ocr,
-        )
+    charge_items, found_itemized_doc = get_charge_items(
+        folder_info,
+        claim_amount,
+        claim_data,
+    )
 
     print(f"FINAL ITEMIZED DOC: {charge_items}")
     if found_itemized_doc:
