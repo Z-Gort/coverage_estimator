@@ -13,7 +13,7 @@ export const createTable = pgTableCreator((name) => `corgi_fullstack_${name}`);
 
 export const posts = createTable("post", (d) => ({
   id: d.integer().primaryKey().generatedByDefaultAsIdentity(),
-  input: d.integer(),
-  result: d.integer(),
+  input: d.integer().array(),
+  result: d.integer().array(),
   createdAt: d.timestamp().defaultNow().notNull(),
 }));

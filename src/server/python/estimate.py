@@ -1,17 +1,15 @@
 import sys
 import json
+import time
 from typing import Any, Dict
 import anthropic
 from utils import (
     read_security_deposit_claims,
     read_folder_contents,
     extract_document_content,
-    update_database_result,
     ANTHROPIC_API_KEY,
     calculate_approved_benefit,
 )
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 
 def analyze_individual_document_for_charges(
     document_content: Dict[str, Any],
@@ -338,77 +336,61 @@ def process_claim_by_folder_number(folder_number):
     }
 
 
-def run_unit_tests():
-    folder_numbers = [365, 373, 413, 449, 455, 456]
+def process_claims_batch(folder_numbers):
+    results = []
     claims_dict = read_security_deposit_claims()
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_folder = {
-            executor.submit(process_claim_by_folder_number, folder): folder
-            for folder in folder_numbers
-        }
+    for i, folder_number in enumerate(folder_numbers):
+        try:
+            result = process_claim_by_folder_number(folder_number)
+            print("FOLDER_NUMBER: ", folder_number, json.dumps(results, indent=2))
 
-        for future in as_completed(future_to_folder):
-            folder = future_to_folder[future]
-            try:
-                result = future.result()
-                computed_benefit = (
-                    result.get("approved_benefit", "N/A")
-                    if isinstance(result, dict)
-                    else "N/A"
-                )
+            claim_data = claims_dict.get(str(folder_number))
 
-                # Get reference values from CSV
-                claim_data = claims_dict.get(str(folder), {})
-                reference_benefit = claim_data.get("Approved Benefit Amount", "N/A")
-                pm_explanation = claim_data.get("PM Explanation", "N/A")
+            ai_approved_benefit = result.get("approved_benefit") if result else None
+            actual_approved_benefit = (
+                claim_data.get("Approved Benefit Amount") if claim_data else None
+            )
+            pm_explanation = claim_data.get("PM Explanation") if claim_data else None
 
-                print(
-                    f"Folder {folder}: Computed=${computed_benefit} | Human=${reference_benefit} | Explan: {pm_explanation}"
-                )
-            except Exception as e:
-                print(f"Folder {folder}: Error - {e}")
+            print(
+                f"Folder {folder_number}: AI=${ai_approved_benefit}, Actual={actual_approved_benefit}, PM={pm_explanation}"
+            )
+
+            results.append(
+                {"folder_number": folder_number, "result": result, "success": True}
+            )
+        except Exception as e:
+            results.append(
+                {
+                    "folder_number": folder_number,
+                    "result": None,
+                    "success": False,
+                    "error": str(e),
+                }
+            )
+
+        if i < len(folder_numbers) - 1:
+            time.sleep(10)
+
+    return results
 
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) > 1 and sys.argv[1] == "unit":
-            print("Running unit tests...")
-            run_unit_tests()
-        else:
-            folder_number = int(sys.argv[1])
+        folder_numbers_str = sys.argv[1]
+        folder_numbers = [int(num.strip()) for num in folder_numbers_str.split(",")]
 
-            print("starting python script")
-            result = process_claim_by_folder_number(folder_number)
-            print(result)
-
-            approved_benefit = result.get("approved_benefit")  # type: ignore
-            # if not testing, update db
-            if len(sys.argv) == 3:
-                row_id = int(sys.argv[2])
-                if approved_benefit is not None:
-                    update_database_result(row_id, approved_benefit)
+        results = process_claims_batch(folder_numbers)
+        print(json.dumps(results, indent=2))
 
     except Exception as e:
         import traceback
 
-        # Get detailed error information
         error_details = {
-            "error": f"Script execution failed: {str(e)}",
-            "error_type": type(e).__name__,
+            "error": f"Script failed: {str(e)}",
             "traceback": traceback.format_exc(),
-            "line_number": (
-                traceback.extract_tb(e.__traceback__)[-1].lineno
-                if e.__traceback__
-                else None
-            ),
-            "filename": (
-                traceback.extract_tb(e.__traceback__)[-1].filename
-                if e.__traceback__
-                else None
-            ),
         }
-
         print(json.dumps(error_details, indent=2))
         sys.exit(1)
 
