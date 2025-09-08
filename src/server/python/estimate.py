@@ -29,6 +29,7 @@ class ChargeItem(BaseModel):
     date: Optional[str] = (
         None  # Optional date associated with the charge (mm/dd/yy format)
     )
+    is_rent: bool = False  # Represents unpaid rent
 
 
 class DocumentChargeAnalysis(BaseModel):
@@ -55,7 +56,9 @@ class DocumentChargeAnalysis(BaseModel):
 
     DATE EXTRACTION:
     --For each charge, try to find an associated date if possible and write in mm/dd/yy format (If not found leave None).
-    --Look for dates for each charge item in formats like mm/dd/yy, mm/dd/yyyy, or similar.
+
+    IS_RENT:
+    --ONLY if you are confident a charge represents unpaid rent, set is_rent to True.
 
     SPECIAL CASE:
     If the document is called ledger and has a 'balance as of' and 'total unpaid' in the grid. Then look to grab all the charges ABOVE the last paid rent.
@@ -125,6 +128,7 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
                     "cost": int(item["cost"]),
                     "description": str(item["description"]),
                     "date": item.get("date"),  # Include optional date
+                    "is_rent": item.get("is_rent", False),  # Include is_rent field
                 }
                 for item in annotation_data.get("charge_items", [])
             ]
@@ -154,29 +158,34 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
 
 
 def analyze_itemized_charge_coverage(charge_items, claim_data, monthly_rent=None):
-    # Filter out charges that come after lease end date
-    # lease_end_date_str = claim_data.get("Lease End Date", "").strip()
-    # if lease_end_date_str:
-    #     lease_end_date = parse_date_string(lease_end_date_str)
-    #     if lease_end_date:
-    #         filtered_charge_items = []
-    #         for item in charge_items:
-    #             charge_date_str = item.get("date")
-    #             if charge_date_str:
-    #                 charge_date = parse_date_string(charge_date_str)
-    #                 if charge_date and charge_date <= lease_end_date:
-    #                     filtered_charge_items.append(item)
-    #                 elif not charge_date:
-    #                     # If we can't parse the charge date, include it (default behavior)
-    #                     filtered_charge_items.append(item)
-    #             else:
-    #                 # If no date is provided for the charge, include it (default behavior)
-    #                 filtered_charge_items.append(item)
+    # Filter out rent charges that come after lease end date
+    lease_end_date_str = claim_data.get("Lease End Date", "").strip()
+    if lease_end_date_str:
+        lease_end_date = parse_date_string(lease_end_date_str)
+        if lease_end_date:
+            filtered_charge_items = []
+            for item in charge_items:
+                # Only apply date filtering to rent charges
+                if item.get("is_rent", False):
+                    charge_date_str = item.get("date")
+                    if charge_date_str:
+                        charge_date = parse_date_string(charge_date_str)
+                        if charge_date and charge_date <= lease_end_date:
+                            filtered_charge_items.append(item)
+                        elif not charge_date:
+                            # If we can't parse the rent charge date, include it (default behavior)
+                            filtered_charge_items.append(item)
+                    else:
+                        # If no date is provided for the rent charge, include it (default behavior)
+                        filtered_charge_items.append(item)
+                else:
+                    # Non-rent charges are always included regardless of date
+                    filtered_charge_items.append(item)
 
-    #         print(
-    #             f"Filtered {len(charge_items) - len(filtered_charge_items)} charges after lease end date {lease_end_date_str}"
-    #         )
-    #         charge_items = filtered_charge_items
+            print(
+                f"Filtered {len(charge_items) - len(filtered_charge_items)} rent charges after lease end date {lease_end_date_str}"
+            )
+            charge_items = filtered_charge_items
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -332,14 +341,6 @@ def process_claim_by_folder_number(folder_number):
                     print(
                         f"New best match: total ${current_total}, diff ${current_diff}"
                     )
-                # If the diff is close to the best diff, and the document has dates, use it
-                elif current_diff <= best_diff + 10 and current_has_dates:
-                    charge_items = current_charge_items
-                    found_itemized_doc = True
-                    best_diff = current_diff
-                    print(
-                        f"Close match with dates: total ${current_total}, diff ${current_diff}"
-                    )
             elif not found_itemized_doc:
                 charge_items = current_charge_items
                 found_itemized_doc = True
@@ -478,7 +479,8 @@ if __name__ == "__main__":
 # 726 -- gives full payout -- (can't read--error not too bad))
 # 728 -- partial excluding fees -- (correct)
 # 757 -- normal full payout (no--substantial error--reletting covered in this case, isn't in others...)
-# 888
+# 888 -- (pretty off--confused why this one is reading the itemized charges so weird)
+# 922 -- (correct--filters out rent past lease end correctly)
 
 # PRIORITIES:
 # go through and use all notes to make not-covered list--also improve prompt syntax for claude
