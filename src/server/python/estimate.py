@@ -24,7 +24,7 @@ from utils import (
 
 # Pydantic model for Mistral OCR document annotation
 class ChargeItem(BaseModel):
-    cost: int  # Cost of the charge in dollars (whole numbers only, no cents)
+    cost: float  # Cost of the charge in dollars
     description: str  # Description of the charge/item
 
 
@@ -40,23 +40,22 @@ class DocumentChargeAnalysis(BaseModel):
     - Repair/cleaning costs
     - Damage charges
     - Fee breakdowns
-    - Monthly rent amounts (from lease agreements, rent schedules, ledgers showing monthly rent payments)
 
     RULES:
     --ONLY include charges which are outstanding at move-out/still due. NOT charges that were already paid.
     --If document shows both paid and unpaid items, look for "balance due" and include ONLY items contributing to that balance.
 
-    The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't necessarily showing outstanding costs.
+    NOTE:
+    --The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't necessarily showing outstanding costs.
+    --Pay attention to decimals and commas. (Numbers will barely ever be above 10,000 in reality)
+
 
     SPECIAL CASE:
-    If the document is called ledger and has a 'balance as of' and 'total unpaid' in the grid. Then look to grab all the charges AFTER the last paid rent.
+    If the document is called ledger and has a 'balance as of' and 'total unpaid' in the grid. Then look to grab all the charges ABOVE the last paid rent.
     """
 
     has_itemized_charges: bool  # True if the document contains a clear list/enumeration of specific charges with individual costs
     charge_items: list[ChargeItem]  # Array of itemized charges found in the document
-    monthly_rent: (
-        int | None
-    )  # Monthly rent amount in dollars if found in the document, null if not found
 
 
 def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any]:
@@ -92,7 +91,6 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
             return {
                 "has_itemized_charges": False,
                 "charge_items": [],
-                "monthly_rent": None,
                 "error": f"Unsupported file type",
             }
 
@@ -117,19 +115,16 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
                 {"cost": int(item["cost"]), "description": str(item["description"])}
                 for item in annotation_data.get("charge_items", [])
             ]
-            monthly_rent = annotation_data.get("monthly_rent")
             return {
                 "has_itemized_charges": bool(
                     annotation_data.get("has_itemized_charges", False)
                 ),
                 "charge_items": charge_items,
-                "monthly_rent": int(monthly_rent) if monthly_rent else None,
             }
         else:
             return {
                 "has_itemized_charges": False,
                 "charge_items": [],
-                "monthly_rent": None,
                 "error": "No annotation data found",
             }
 
@@ -137,7 +132,6 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
         return {
             "has_itemized_charges": False,
             "charge_items": [],
-            "monthly_rent": None,
             "error": f"OCR failed: {str(e)}",
         }
 
@@ -157,8 +151,8 @@ ITEMIZED CHARGES TO ANALYZE:
 For each charge in order, determine if it's covered by insurance following the given decision rules.
 
 RULES:
---Repairs, maintenance, cleaning/carpet cleaning, loss of rent due to inability, reletting fees, unpaid rent, are generally covered.
---Admin/other fees, utilities, pet incurred damages, pest control, gutter cleaning, are generally NOT covered (anything not listed is generally covered).
+--Repairs, maintenance, cleaning/carpet cleaning, loss of rent due to inability, unpaid rent, are generally covered.
+--Fees of any kind (admin, reletting, late fees), utilities, ANY pet incurred damages, RIS plan, pest control, gutter cleaning, are generally NOT covered (anything not listed is generally covered).
 --When in doubt, COVER THE CHARGE.
 
 """
@@ -246,14 +240,21 @@ def process_claim_by_folder_number(folder_number):
     claims_dict = read_security_deposit_claims()
     claim_data = claims_dict.get(str(folder_number))
 
+    # Get monthly rent directly from claims data
+    monthly_rent = None
+    if claim_data and "Monthly Rent" in claim_data:
+        monthly_rent_str = claim_data["Monthly Rent"].replace("$", "").replace(",", "")
+        try:
+            monthly_rent = int(float(monthly_rent_str))
+        except (ValueError, AttributeError):
+            monthly_rent = None
+
     folder_info = read_folder_contents(str(folder_number))
     charge_items = []
     found_itemized_doc = False
-    monthly_rent = None
-    found_monthly_rent = False
 
     for file_info in folder_info:
-        # Analyze document with OCR for both charges and monthly rent
+        # Analyze document with OCR for charges only
         charge_analysis = analyze_individual_document_for_charges_ocr(file_info["path"])
         print(f"Charge analysis: {charge_analysis}")
 
@@ -261,14 +262,6 @@ def process_claim_by_folder_number(folder_number):
         if not found_itemized_doc and charge_analysis.get("has_itemized_charges"):
             charge_items = charge_analysis.get("charge_items", [])
             found_itemized_doc = True
-
-        # Check for monthly rent if not found yet
-        if not found_monthly_rent and charge_analysis.get("monthly_rent"):
-            monthly_rent = charge_analysis.get("monthly_rent")
-            found_monthly_rent = True
-
-        # Stop processing if we found both
-        if found_itemized_doc and found_monthly_rent:
             break
 
     if found_itemized_doc:
@@ -398,15 +391,25 @@ if __name__ == "__main__":
 
 # MISTRAL:
 # 365 -- partial payout, no coverage income HOA violations, covering property damages only (misses some of the charges, but still gets correct)
-# 373 -- normal full payout -- fails to read, tries to round to rent (error of 20%--not terrible)
-# 405 -- AI thinks it shouldn't pay out for unpaid rent (big error I think)
+# 373 -- normal full payout -- (can't read, then limits on rent rounded up but for some reason shouldn't--medium error))
+# 405 -- AI thinks it shouldn't pay out for unpaid rent (caps on monthly rent--annoying--prety big error)
 # 413 -- partial payout excluding tenant fees (good)
-# 417 -- partial--excludes fees (good)
-# 449 -- No coverage for asset protection fee or utility expenses -- (quite close)
-# 455 -- No coverage pest/gutter -- (quite close)
-# 456 -- payout limited by max benefit (good)
-# 703 -- constrained by monthly rent (good)
-# 705 -- constrained by montly rent (good)
-# 726 -- gives full payout (can't read itemized, pays out full--turns out to be low error))
-# 728 -- partial excluding fees (correctly excludes fees--good)
-# 757 -- normal full payout (pays out full--good)
+# 417 -- partial--excludes fees (incorrect, overshot, fairly large error--this is a tough one because unpaid rent is not covered here but sometimes is)
+# 449 -- No coverage for asset protection fee or utility expenses -- (good)
+# 455 -- No coverage pest/gutter -- (pretty low error)
+# 456 -- payout limited by max benefit -- (correct)
+# 703 -- constrained by monthly rent  --
+# 705 -- constrained by montly rent
+# 726 -- gives full payout
+# 728 -- partial excluding fees
+# 757 -- normal full payout
+
+# PRIORITIES:
+# figure out monthly rent cap
+# go through and use all notes to make not-covered list--also improve prompt syntax for claude
+# lease/security deposit deadline coverage cases
+# best itemization optimization
+
+
+# Montly rent pattern finding:
+# 
