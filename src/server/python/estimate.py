@@ -19,54 +19,14 @@ from utils import (
     count_pdf_pages,
     clip_pdf_to_pages,
     parse_date_string,
+    process_default_charge_analysis,
 )
+from dynamic_analysis import create_analysis_class
 
 
-# Pydantic model for Mistral OCR document annotation
-class ChargeItem(BaseModel):
-    cost: float  # Cost of the charge in dollars
-    description: str  # Description of the charge/item
-    date: Optional[str] = (
-        None  # Optional date associated with the charge (mm/dd/yy format)
-    )
-    is_rent: bool = False  # Represents unpaid rent
-
-
-class DocumentChargeAnalysis(BaseModel):
-    """
-    Analyze this document to determine if it contains itemized move-out charges, security deposit charges, or outstanding charges from a rental property.
-
-    Look for things like:
-    - Security deposit itemization/disposition
-    - Move-out charges
-    - Outstanding balance itemization
-    - Ledger entries showing charges
-    - Repair/cleaning costs
-    - Damage charges
-    - Fee breakdowns
-    - Pending unpaid rent
-
-    RULES:
-    --ONLY include charges which are outstanding at move-out/still due. NOT charges that were already paid.
-    --If document shows both paid and unpaid items, look items which still have UNPAID balance.
-    --IMPORTANT: If the doc has paid and unpaid items--aim for the unpaid items to add to TOTAL BALANCE DUE--often unpaid items will be at the very bottom or top of the doc and will come ABOVE or BELOW the last paid items. DONT INCLUDE PAID RENT/ITEMS
-
-    NOTE:
-    --The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't necessarily showing outstanding costs.
-    --Pay attention to decimals and commas. (Numbers will barely ever be above 10,000 in reality)
-
-    DATE EXTRACTION:
-    --For each charge, try to find an associated date if possible and write in mm/dd/yy format (If not found leave None).
-
-    IS_RENT:
-    --ONLY if you are confident a charge represents unpaid rent, set is_rent to True.
-    """
-
-    has_itemized_charges: bool  # True if the document contains a clear list/enumeration of specific charges with individual costs
-    charge_items: list[ChargeItem]  # Array of itemized charges found in the document
-
-
-def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any]:
+def analyze_individual_document_for_charges_ocr(
+    file_path: str, custom_analysis_class=None
+) -> Dict[str, Any]:
     """Analyze document using Mistral OCR with document annotations."""
     temp_pdf_path = None
     try:
@@ -115,7 +75,9 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
             model="mistral-ocr-latest",
             document=DocumentURLChunk(document_url=document_url),
             document_annotation_format=response_format_from_pydantic_model(
-                DocumentChargeAnalysis
+                create_analysis_class()
+                if not custom_analysis_class
+                else custom_analysis_class
             ),
             include_image_base64=True,
         )
@@ -299,7 +261,8 @@ RULES:
 def process_claim_by_folder_number(folder_number):
     claims_dict = read_security_deposit_claims()
     claim_data = claims_dict.get(str(folder_number))
-
+    if not claim_data:
+        return
     max_benefit_str = (
         claim_data["Max Benefit"].replace("$", "").replace(",", "")
         if claim_data
@@ -307,52 +270,48 @@ def process_claim_by_folder_number(folder_number):
     )
     if not max_benefit_str:
         return {"approved_benefit": 0, "coverage_decisions": []}
-
-    # Get monthly rent directly from claims data
+    max_benefit = int(float(max_benefit_str))
     monthly_rent = None
     if claim_data and "Monthly Rent" in claim_data:
         monthly_rent_str = claim_data["Monthly Rent"].replace("$", "").replace(",", "")
-        try:
+        if monthly_rent_str:
             monthly_rent = int(float(monthly_rent_str))
-        except (ValueError, AttributeError):
-            monthly_rent = None
 
     folder_info = read_folder_contents(str(folder_number))
-    charge_items = []
-    found_itemized_doc = False
-    best_diff = float("inf")
 
     claim_amount_str = (
         claim_data.get("Amount of Claim").replace("$", "").replace(",", "")  # type: ignore
     )
     claim_amount = int(float(claim_amount_str))
 
-    for file_info in folder_info:
-        # Analyze document with OCR for charges only
-        charge_analysis = analyze_individual_document_for_charges_ocr(file_info["path"])
-
-        # Check for itemized charges
-        if charge_analysis.get("has_itemized_charges"):
-            current_charge_items = charge_analysis.get("charge_items", [])
-            current_total = sum(item["cost"] for item in current_charge_items)
-
-            # Optimization--look for best itemized charges
-            if claim_amount:
-                current_diff = abs(current_total - claim_amount)
-                current_has_dates = any(
-                    item.get("date") for item in current_charge_items
+    # Process charge items based on property management company
+    if claim_data.get("Property Management Company", "") == "Excalibur Homes":
+        charge_items = []
+        found_itemized_doc = False
+        for file_info in folder_info:
+            if "ledger" in file_info["path"].lower():
+                charge_analysis = analyze_individual_document_for_charges_ocr(
+                    file_info["path"], create_analysis_class("Excalibur Homes")
                 )
-
-                if current_diff < best_diff:
-                    charge_items = current_charge_items
-                    found_itemized_doc = True
-                    best_diff = current_diff
-                    print(
-                        f"New best match: total ${current_total}, diff ${current_diff}"
-                    )
-            elif not found_itemized_doc:
-                charge_items = current_charge_items
+                charge_items = charge_analysis.get("charge_items", [])
                 found_itemized_doc = True
+    elif claim_data.get("Property Management Company", "") == "Pure Operating LLC":
+        charge_items = []
+        found_itemized_doc = False
+        for file_info in folder_info:
+            if "ledger" in file_info["path"].lower():
+                charge_analysis = analyze_individual_document_for_charges_ocr(
+                    file_info["path"], create_analysis_class("Pure Operating LLC")
+                )
+                charge_items = charge_analysis.get("charge_items", [])
+                found_itemized_doc = True
+    else:
+        charge_items, found_itemized_doc = process_default_charge_analysis(
+            folder_info,
+            claim_amount,
+            create_analysis_class,
+            analyze_individual_document_for_charges_ocr,
+        )
 
     print(f"FINAL ITEMIZED DOC: {charge_items}")
     if found_itemized_doc:
@@ -374,13 +333,8 @@ def process_claim_by_folder_number(folder_number):
                     f"Total charges {total_charges} are not close to {claim_amount}. Moving to backup."
                 )
         else:
-            print(f"Error parsing claim amount, moving to backup.")
+            print(f"Unexpected empty claim. Moving to backup.")
             pass
-
-    max_benefit_str = (
-        claim_data.get("Max Benefit").replace("$", "").replace(",", "")  # type: ignore
-    )
-    max_benefit = int(float(max_benefit_str))
 
     requested_claim_str = (
         claim_data.get("Amount of Claim").replace("$", "").replace(",", "")  # type: ignore
@@ -512,11 +466,12 @@ if __name__ == "__main__":
 # dont cover for anything if no paid rent
 
 # PASS 2
-# 365 - Can't read itemized doc--includes too many paid items/normal rent
-# 366 - Can't almost can read but can't -- so throws away what would've been ok data
+# 365 - Can't read itemized doc--includes too many paid items/normal rent -- (with Excalibur special case--WORKS BETTER)
+# 366 - Can't almost can read but can't -- so throws away what would've been ok data -- (doesn't work even with special case)
 # 373 - potentially correct--easy case of limiting on claim_amount, unsure if actually perfect
 # 405 - caps on rent--leads to pretty big error
 # 413 - reads and excldues fees -- good
 # 417 -- covers rent when it shouldn't in this case -- may be good if fixed
-
-
+# 449 -- still works
+# 512 -- an easy one because requested is accepted--but correctly reasoned from itemized charges
+# 726 --

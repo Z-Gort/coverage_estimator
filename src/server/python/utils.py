@@ -135,6 +135,7 @@ def calculate_approved_benefit(
 
     return min(constraints)
 
+
 def parse_date_string(date_str: str) -> Optional[datetime]:
     """Parse date string in various formats (mm/dd/yy, mm/dd/yyyy) to datetime object."""
     if not date_str:
@@ -158,3 +159,41 @@ def parse_date_string(date_str: str) -> Optional[datetime]:
             continue
 
     return None
+
+
+def process_default_charge_analysis(
+    folder_info,
+    claim_amount,
+    create_analysis_class,
+    analyze_individual_document_for_charges_ocr,
+):
+    charge_items = []
+    found_itemized_doc = False
+    best_diff = float("inf")
+
+    for file_info in folder_info:
+        # Analyze document with OCR for charges only
+        charge_analysis = analyze_individual_document_for_charges_ocr(
+            file_info["path"], create_analysis_class()
+        )
+
+        # Check for itemized charges
+        if charge_analysis.get("has_itemized_charges"):
+            current_charge_items = charge_analysis.get("charge_items", [])
+            current_total = sum(item["cost"] for item in current_charge_items)
+
+            # Optimization--look for best itemized charges
+            if claim_amount:
+                current_diff = abs(current_total - claim_amount)
+                if current_diff < best_diff:
+                    charge_items = current_charge_items
+                    found_itemized_doc = True
+                    best_diff = current_diff
+                    print(
+                        f"New best match: total ${current_total}, diff ${current_diff}"
+                    )
+            elif not found_itemized_doc:
+                charge_items = current_charge_items
+                found_itemized_doc = True
+
+    return charge_items, found_itemized_doc
