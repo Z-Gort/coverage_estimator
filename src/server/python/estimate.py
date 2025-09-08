@@ -183,11 +183,11 @@ For each charge in order, determine if it's covered by insurance by analyzing th
 RULES:
 --Any document explicitly stating claim rules OVERRIDE these general guidelines.
 --Repairs, maintenance, cleaning/carpet cleaning,loss of rent due to inhability, reletting fees, are generally covered.
---Admin/other fees (EXCEPT for reletting fees), utilities, pet incurred damages, pest control, gutter cleaning, are generally NOT covered.
+--Admin/other fees (EXCEPT for reletting fees), utilities, unpaid rent, pet incurred damages, pest control, gutter cleaning, are generally NOT covered.
 --When in doubt, allow the charge to be covered.
 
 """
-#Note: Unpaid rent seems to be covered and not covered in different cases.
+    # Note: Unpaid rent seems to be covered and not covered in different cases.
 
     try:
         response = client.messages.create(
