@@ -220,12 +220,16 @@ def calculate_approved_benefit(
     max_benefit: int,
     claim_amount: int,
     monthly_rent: int | None = None,
+    claims_data: dict | None = None,
 ) -> int:
     """Calculate approved benefit considering max benefit, optional monthly rent ceiling, and claim amount limit"""
     constraints = [covered_amount, max_benefit, claim_amount]
 
+    # Only apply monthly rent restriction if Treaty # is T00002 or T00001
     if monthly_rent:
-        monthly_rent_ceiling = calculate_monthly_rent_ceiling(monthly_rent)
-        constraints.append(monthly_rent_ceiling)
+        treaty_num = claims_data.get("Treaty #", "") if claims_data else ""
+        if treaty_num in ["T00002", "T00001"]:
+            monthly_rent_ceiling = calculate_monthly_rent_ceiling(monthly_rent)
+            constraints.append(monthly_rent_ceiling)
 
     return min(constraints)

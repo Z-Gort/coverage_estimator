@@ -158,9 +158,9 @@ ITEMIZED CHARGES TO ANALYZE:
 For each charge in order, determine if it's covered by insurance following the given decision rules.
 
 RULES:
---Repairs, maintenance, cleaning/carpet cleaning, loss of rent due to inability, unpaid rent, are generally covered.
---Fees of any kind (admin, reletting, late fees), utilities, ANY pet incurred damages, RIS plan, pest control, gutter cleaning, are generally NOT covered (anything not listed is generally covered).
---When in doubt, COVER THE CHARGE.
+--When in doubt, COVER THE CHARGE
+--COVERED: Repairs, maintenance, cleaning/carpet cleaning, loss of rent, unpaid rent, and anything not mentioned as NOT COVERED
+--NOT COVERED: Fees (asset protection, admin, reletting, amenity service packages, sd deposit charges, late, any other fee), utilities, ANY pet related damages/expenses, RIS plan, pest control, gutter cleaning, 
 
 """
     # Note: Unpaid rent seems to be covered and not covered in different cases
@@ -230,7 +230,7 @@ RULES:
             claim_amount = int(float(claim_amount_str))
 
             approved_benefit = calculate_approved_benefit(
-                total_covered, max_benefit, claim_amount, monthly_rent
+                total_covered, max_benefit, claim_amount, monthly_rent, claim_data
             )
 
             return {
@@ -322,7 +322,7 @@ def process_claim_by_folder_number(folder_number):
 
     return {
         "approved_benefit": calculate_approved_benefit(
-            max_benefit, max_benefit, requested_claim, monthly_rent
+            max_benefit, max_benefit, requested_claim, monthly_rent, claim_data
         )
     }
 
