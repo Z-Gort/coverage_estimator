@@ -1,109 +1,134 @@
 import sys
 import json
 import time
+import os
+import tempfile
 from typing import Any, Dict
 from pathlib import Path
 import anthropic
+from pydantic import BaseModel
+from mistralai import Mistral, DocumentURLChunk
+from mistralai.extra import response_format_from_pydantic_model
 from utils import (
     read_security_deposit_claims,
     read_folder_contents,
     extract_document_content,
     update_database_result,
     ANTHROPIC_API_KEY,
+    MISTRAL_API_KEY,
     calculate_approved_benefit,
+    encode_pdf_to_base64,
+    count_pdf_pages,
+    clip_pdf_to_pages,
 )
 
 
-def analyze_individual_document_for_charges(
-    document_content: Dict[str, Any],
-) -> Dict[str, Any]:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# Pydantic model for Mistral OCR document annotation
+class ChargeItem(BaseModel):
+    cost: int  # Cost of the charge in dollars (whole numbers only, no cents)
+    description: str  # Description of the charge/item
 
-    prompt = f"""Analyze this document to determine if it contains itemized move-out charges, security deposit charges, or outstanding charges from a rental property.
 
-TITLE:
-{document_content.get('title', '')}
+class DocumentChargeAnalysis(BaseModel):
+    """
+    Analyze this document to determine if it contains itemized move-out charges, security deposit charges, or outstanding charges from a rental property.
 
-DOCUMENT CONTENT:
-{document_content.get('text', '')}
+    Look for things like:
+    - Security deposit itemization/disposition
+    - Move-out charges
+    - Outstanding balance itemization
+    - Ledger entries showing charges
+    - Repair/cleaning costs
+    - Damage charges
+    - Fee breakdowns
 
-Please determine:
-1. Does this document enumerate/list specific charges related to move-out, security deposit deductions, outstanding tenant chargesm or very similar?
-2. If yes, extract each itemized charge with its cost and description.
+    RULES:
+    --ONLY include charges which are outstanding at move-out/still due. NOT charges that were already paid.
+    --If document shows both paid and unpaid items, look for "balance due" and include ONLY items contributing to that balance.
 
-Look for things like:
-- Security deposit itemization/disposition
-- Move-out charges
-- Outstanding balance itemization  
-- Ledger entries showing charges
-- Repair/cleaning costs
-- Damage charges
-- Fee breakdowns
+    The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't necessarily showing outstanding costs.
 
-RULES:
---ONLY include charges which are outstanding at move-out/still due. NOT charges that were already paid.
---If document shows both paid and unpaid items, look for "balance due" and include ONLY items contributing to that balance.
+    SPECIAL CASE:
+    If the document is called ledger and has a 'balance as of' and 'total unpaid' in the grid. Then look to grab all the charges AFTER the last paid rent. """
 
-The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't neccessarily showing oustanding costs."""
+    has_itemized_charges: bool  # True if the document contains a clear list/enumeration of specific charges with individual costs
+    charge_items: list[ChargeItem]  # Array of itemized charges found in the document
 
+def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any]:
+    """Analyze document using Mistral OCR with document annotations."""
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}],
-            tools=[
-                {
-                    "name": "analyze_document_charges",
-                    "description": "Submit analysis of whether document contains itemized charges and extract them",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "has_itemized_charges": {
-                                "type": "boolean",
-                                "description": "True if the document contains a list/enumeration of specific charges with costs",
-                            },
-                            "charge_items": {
-                                "type": "array",
-                                "description": "List of itemized charges found in the document",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "cost": {
-                                            "type": "integer",
-                                            "description": "Cost of the charge in dollars (whole numbers only, no cents)",
-                                        },
-                                        "description": {
-                                            "type": "string",
-                                            "description": "Description of the charge/item",
-                                        },
-                                    },
-                                    "required": ["cost", "description"],
-                                },
-                            },
-                        },
-                        "required": ["has_itemized_charges", "charge_items"],
-                    },
-                }
-            ],
-            tool_choice={"type": "tool", "name": "analyze_document_charges"},
-        )
+        file_path_obj = Path(file_path)
+        file_extension = file_path_obj.suffix.lower()
 
-        # Extract the structured output
-        tool_use = response.content[0]
-        if tool_use.type == "tool_use" and tool_use.name == "analyze_document_charges":
-            return tool_use.input  # type: ignore
+        # Clip PDF if >8 pages
+        pdf_to_process = file_path
+        if file_extension == ".pdf" and count_pdf_pages(file_path) > 8:
+            print(f"Clipping PDF to 8 pages")
+            temp_fd, pdf_to_process = tempfile.mkstemp(suffix=".pdf", prefix="clipped_")
+            os.close(temp_fd)
+            clip_pdf_to_pages(file_path, pdf_to_process, max_pages=8)
+
+        # Encode to base64
+        if file_extension == ".pdf":
+            base64_data = encode_pdf_to_base64(pdf_to_process)
+            document_url = f"data:application/pdf;base64,{base64_data}"
+        elif file_extension in [".jpg", ".jpeg", ".png", ".tiff", ".bmp"]:
+            with open(file_path, "rb") as f:
+                import base64
+
+                base64_data = base64.b64encode(f.read()).decode("utf-8")
+            mime_type = (
+                f"image/{file_extension[1:]}"
+                if file_extension != ".jpg"
+                else "image/jpeg"
+            )
+            document_url = f"data:{mime_type};base64,{base64_data}"
         else:
             return {
                 "has_itemized_charges": False,
                 "charge_items": [],
-                "error": "Unexpected response format",
+                "error": f"Unsupported file type",
+            }
+
+        # Process with Mistral OCR
+        client = Mistral(api_key=MISTRAL_API_KEY)
+        response = client.ocr.process(
+            model="mistral-ocr-latest",
+            document=DocumentURLChunk(document_url=document_url),
+            document_annotation_format=response_format_from_pydantic_model(
+                DocumentChargeAnalysis
+            ),
+            include_image_base64=True,
+        )
+
+        # Extract annotation data
+        annotation_data = getattr(response, "document_annotation", None)
+        if isinstance(annotation_data, str):
+            annotation_data = json.loads(annotation_data)
+
+        if annotation_data:
+            charge_items = [
+                {"cost": int(item["cost"]), "description": str(item["description"])}
+                for item in annotation_data.get("charge_items", [])
+            ]
+            return {
+                "has_itemized_charges": bool(
+                    annotation_data.get("has_itemized_charges", False)
+                ),
+                "charge_items": charge_items,
+            }
+        else:
+            return {
+                "has_itemized_charges": False,
+                "charge_items": [],
+                "error": "No annotation data found",
             }
 
     except Exception as e:
         return {
             "has_itemized_charges": False,
             "charge_items": [],
-            "error": f"API call failed: {str(e)}",
+            "error": f"OCR failed: {str(e)}",
         }
 
 
@@ -184,8 +209,8 @@ For each charge in order, determine if it's covered by insurance by analyzing th
 RULES:
 --Any document explicitly stating claim rules OVERRIDE these general guidelines.
 --Repairs, maintenance, cleaning/carpet cleaning,loss of rent due to inhability, reletting fees, unpaid rent, are generally covered.
---Admin/other fees, utilities, pet incurred damages, pest control, gutter cleaning, are generally NOT covered.
---When in doubt, allow the charge to be covered.
+--Admin/other fees, utilities, pet incurred damages, pest control, gutter cleaning, are generally NOT covered (anything not listed is generally covered).
+--When in doubt, allow the COVER THE CHARGE.
 
 """
     # Note: Unpaid rent seems to be covered and not covered in different cases
@@ -280,32 +305,33 @@ def process_claim_by_folder_number(folder_number):
     found_monthly_rent = False
 
     for file_info in folder_info:
-        content = extract_document_content(file_info["path"])
-        if "error" not in content:
-            print(f"Content: {content["text"][:20]}")
-            folder_contents.append(content)
+        # Look for itemized charges if not found yet - use OCR directly
+        if not found_itemized_doc:
+            charge_analysis = analyze_individual_document_for_charges_ocr(
+                file_info["path"]
+            )
+            print(f"Charge analysis: {charge_analysis}")
+            if charge_analysis.get("has_itemized_charges"):
+                charge_items = charge_analysis.get("charge_items", [])
+                found_itemized_doc = True
 
-            # Look for itemized charges if not found yet
-            if not found_itemized_doc:
-                charge_analysis = analyze_individual_document_for_charges(content)
-                print(f"Charge analysis: {charge_analysis}")
-                if charge_analysis.get("has_itemized_charges"):
-                    charge_items = charge_analysis.get("charge_items", [])
-                    found_itemized_doc = True
+        # Look for monthly rent if not found yet - still need to extract content for this
+        if not found_monthly_rent:
+            content = extract_document_content(file_info["path"])
+            if "error" not in content:
+                print(f"Content: {content["text"][:20]}")
+                folder_contents.append(content)
 
-            # Look for monthly rent if not found yet
-            if not found_monthly_rent:
                 doc_monthly_rent = analyze_document_for_monthly_rent(content)
                 if doc_monthly_rent:
                     monthly_rent = doc_monthly_rent
                     found_monthly_rent = True
+            else:
+                print(f"Error extracting {file_info['path']}: {content['error']}")
 
-            # Stop processing if we found both
-            if found_itemized_doc and found_monthly_rent:
-                break
-        else:
-            print(f"Error extracting {file_info['path']}: {content['error']}")
-            continue
+        # Stop processing if we found both
+        if found_itemized_doc and found_monthly_rent:
+            break
 
     if found_itemized_doc:
         total_charges = sum(item["cost"] for item in charge_items)
@@ -416,6 +442,8 @@ if __name__ == "__main__":
         print(f"Script failed: {str(e)}")
         sys.exit(1)
 
+
+# CLAUDE:
 # 365 -- partial payout, no coverage income HOA violations, covering property damages only (can't read itemized doc--will payout ful OR payout tiny--BAD ERROR)
 # 373 -- normal full payout -- fails to read, tries to round to rent (error of 20%--not terrible)
 # 405 -- AI thinks it shouldn't pay out for unpaid rent (big error I think)

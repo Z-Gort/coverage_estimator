@@ -5,10 +5,44 @@ import anthropic
 from mistralai import Mistral
 import psycopg2
 import math
+from PyPDF2 import PdfReader, PdfWriter
 
 # API Keys
 ANTHROPIC_API_KEY = "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"
 MISTRAL_API_KEY = "hnEcbqbI4cumUHOY8yew25sLjLG1Yoyb"
+
+
+def count_pdf_pages(file_path: str) -> int:
+    try:
+        with open(file_path, "rb") as file:
+            pdf_reader = PdfReader(file)
+            return len(pdf_reader.pages)
+    except Exception as e:
+        print(f"Error counting pages in {file_path}: {e}")
+        return -1
+
+
+def clip_pdf_to_pages(input_path: str, output_path: str, max_pages: int = 8) -> bool:
+    try:
+        with open(input_path, "rb") as input_file:
+            pdf_reader = PdfReader(input_file)
+            pdf_writer = PdfWriter()
+
+            # Add up to max_pages pages to the writer
+            pages_to_add = min(len(pdf_reader.pages), max_pages)
+            for i in range(pages_to_add):
+                pdf_writer.add_page(pdf_reader.pages[i])
+
+            # Write the clipped PDF
+            with open(output_path, "wb") as output_file:
+                pdf_writer.write(output_file)
+
+        print(f"Successfully clipped PDF to {pages_to_add} pages: {output_path}")
+        return True
+
+    except Exception as e:
+        print(f"Error clipping PDF {input_path}: {e}")
+        return False
 
 
 def update_database_result(row_id, result_value):
