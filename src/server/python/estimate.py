@@ -1,9 +1,8 @@
 import sys
 import json
-import time
 import os
 import tempfile
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from pathlib import Path
 import anthropic
 from pydantic import BaseModel
@@ -19,6 +18,7 @@ from utils import (
     encode_pdf_to_base64,
     count_pdf_pages,
     clip_pdf_to_pages,
+    parse_date_string,
 )
 
 
@@ -26,6 +26,9 @@ from utils import (
 class ChargeItem(BaseModel):
     cost: float  # Cost of the charge in dollars
     description: str  # Description of the charge/item
+    date: Optional[str] = (
+        None  # Optional date associated with the charge (mm/dd/yy format)
+    )
 
 
 class DocumentChargeAnalysis(BaseModel):
@@ -44,12 +47,15 @@ class DocumentChargeAnalysis(BaseModel):
 
     RULES:
     --ONLY include charges which are outstanding at move-out/still due. NOT charges that were already paid.
-    --If document shows both paid and unpaid items, look for "balance due" and include ONLY items contributing to that balance.
+    --If document shows both paid and unpaid items, look items which still have UNPAID balance.
 
     NOTE:
     --The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't necessarily showing outstanding costs.
     --Pay attention to decimals and commas. (Numbers will barely ever be above 10,000 in reality)
 
+    DATE EXTRACTION:
+    --For each charge, try to find an associated date if possible and write in mm/dd/yy format (If not found leave None).
+    --Look for dates for each charge item in formats like mm/dd/yy, mm/dd/yyyy, or similar.
 
     SPECIAL CASE:
     If the document is called ledger and has a 'balance as of' and 'total unpaid' in the grid. Then look to grab all the charges ABOVE the last paid rent.
@@ -115,7 +121,11 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
 
         if annotation_data:
             charge_items = [
-                {"cost": int(item["cost"]), "description": str(item["description"])}
+                {
+                    "cost": int(item["cost"]),
+                    "description": str(item["description"]),
+                    "date": item.get("date"),  # Include optional date
+                }
                 for item in annotation_data.get("charge_items", [])
             ]
             return {
@@ -144,6 +154,30 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
 
 
 def analyze_itemized_charge_coverage(charge_items, claim_data, monthly_rent=None):
+    # Filter out charges that come after lease end date
+    # lease_end_date_str = claim_data.get("Lease End Date", "").strip()
+    # if lease_end_date_str:
+    #     lease_end_date = parse_date_string(lease_end_date_str)
+    #     if lease_end_date:
+    #         filtered_charge_items = []
+    #         for item in charge_items:
+    #             charge_date_str = item.get("date")
+    #             if charge_date_str:
+    #                 charge_date = parse_date_string(charge_date_str)
+    #                 if charge_date and charge_date <= lease_end_date:
+    #                     filtered_charge_items.append(item)
+    #                 elif not charge_date:
+    #                     # If we can't parse the charge date, include it (default behavior)
+    #                     filtered_charge_items.append(item)
+    #             else:
+    #                 # If no date is provided for the charge, include it (default behavior)
+    #                 filtered_charge_items.append(item)
+
+    #         print(
+    #             f"Filtered {len(charge_items) - len(filtered_charge_items)} charges after lease end date {lease_end_date_str}"
+    #         )
+    #         charge_items = filtered_charge_items
+
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     charges_text = ""
@@ -160,7 +194,7 @@ For each charge in order, determine if it's covered by insurance following the g
 RULES:
 --When in doubt, COVER THE CHARGE
 --COVERED: Repairs, maintenance, cleaning/carpet cleaning, loss of rent, unpaid rent, and anything not mentioned as NOT COVERED
---NOT COVERED: Fees (asset protection, admin, reletting, amenity service packages, sd deposit charges, late, any other fee), utilities, ANY pet related damages/expenses, RIS plan, pest control, gutter cleaning, 
+--NOT COVERED: Fees (asset protection, admin, reletting, amenity service packages, sd deposit charges, late, any other fee), utilities, ANY pet related damages/expenses, RIS plan, pest control, gutter cleaning, HOA violations, renter's insurance
 
 """
     # Note: Unpaid rent seems to be covered and not covered in different cases
@@ -247,6 +281,14 @@ def process_claim_by_folder_number(folder_number):
     claims_dict = read_security_deposit_claims()
     claim_data = claims_dict.get(str(folder_number))
 
+    max_benefit_str = (
+        claim_data["Max Benefit"].replace("$", "").replace(",", "")
+        if claim_data
+        else None
+    )
+    if not max_benefit_str:
+        return {"approved_benefit": 0, "coverage_decisions": []}
+
     # Get monthly rent directly from claims data
     monthly_rent = None
     if claim_data and "Monthly Rent" in claim_data:
@@ -279,12 +321,24 @@ def process_claim_by_folder_number(folder_number):
             # Optimization--look for best itemized charges
             if claim_amount:
                 current_diff = abs(current_total - claim_amount)
+                current_has_dates = any(
+                    item.get("date") for item in current_charge_items
+                )
+
                 if current_diff < best_diff:
                     charge_items = current_charge_items
                     found_itemized_doc = True
                     best_diff = current_diff
                     print(
                         f"New best match: total ${current_total}, diff ${current_diff}"
+                    )
+                # If the diff is close to the best diff, and the document has dates, use it
+                elif current_diff <= best_diff + 10 and current_has_dates:
+                    charge_items = current_charge_items
+                    found_itemized_doc = True
+                    best_diff = current_diff
+                    print(
+                        f"Close match with dates: total ${current_total}, diff ${current_diff}"
                     )
             elif not found_itemized_doc:
                 charge_items = current_charge_items
@@ -424,6 +478,7 @@ if __name__ == "__main__":
 # 726 -- gives full payout -- (can't read--error not too bad))
 # 728 -- partial excluding fees -- (correct)
 # 757 -- normal full payout (no--substantial error--reletting covered in this case, isn't in others...)
+# 888
 
 # PRIORITIES:
 # go through and use all notes to make not-covered list--also improve prompt syntax for claude

@@ -1,11 +1,13 @@
 import csv
 from pathlib import Path
 import base64
-import anthropic
 from mistralai import Mistral
 import psycopg2
 import math
 from PyPDF2 import PdfReader, PdfWriter
+from datetime import datetime
+from typing import Optional
+
 
 # API Keys
 ANTHROPIC_API_KEY = "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"
@@ -233,3 +235,27 @@ def calculate_approved_benefit(
             constraints.append(monthly_rent_ceiling)
 
     return min(constraints)
+
+def parse_date_string(date_str: str) -> Optional[datetime]:
+    """Parse date string in various formats (mm/dd/yy, mm/dd/yyyy) to datetime object."""
+    if not date_str:
+        return None
+
+    # Clean the date string
+    date_str = date_str.strip()
+
+    # Try different date formats
+    formats = [
+        "%m/%d/%y",  # mm/dd/yy
+        "%m/%d/%Y",  # mm/dd/yyyy
+        "%m-%d-%y",  # mm-dd-yy
+        "%m-%d-%Y",  # mm-dd-yyyy
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+
+    return None
