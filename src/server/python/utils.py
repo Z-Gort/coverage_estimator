@@ -66,15 +66,6 @@ def read_security_deposit_claims():
     return claims_dict
 
 
-def filter_claim_data_for_ai(claim_data):
-    """Remove reference answers from claim data before sending to AI"""
-    return {
-        k: v
-        for k, v in claim_data.items()
-        if k not in ["Approved Benefit Amount", "PM Explanation"]
-    }
-
-
 def encode_pdf_to_base64(pdf_path):
     """Encode the PDF to base64."""
     try:
@@ -191,12 +182,16 @@ def calculate_monthly_rent_ceiling(monthly_rent: int) -> int:
 
 
 def calculate_approved_benefit(
-    covered_amount: int, max_benefit: int, monthly_rent: int | None = None
+    covered_amount: int,
+    max_benefit: int,
+    claim_amount: int,
+    monthly_rent: int | None = None,
 ) -> int:
-    """Calculate approved benefit considering max benefit and optional monthly rent ceiling"""
-    print(f"Calculating approved benefit for covered amount: {covered_amount}, max benefit: {max_benefit}, monthly rent: {monthly_rent}")
+    """Calculate approved benefit considering max benefit, optional monthly rent ceiling, and claim amount limit"""
+    constraints = [covered_amount, max_benefit, claim_amount]
+
     if monthly_rent:
         monthly_rent_ceiling = calculate_monthly_rent_ceiling(monthly_rent)
-        return min(covered_amount, max_benefit, monthly_rent_ceiling)
-    else:
-        return min(covered_amount, max_benefit)
+        constraints.append(monthly_rent_ceiling)
+
+    return min(constraints)

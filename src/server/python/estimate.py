@@ -2,6 +2,7 @@ import sys
 import json
 import time
 from typing import Any, Dict
+from pathlib import Path
 import anthropic
 from utils import (
     read_security_deposit_claims,
@@ -182,12 +183,12 @@ For each charge in order, determine if it's covered by insurance by analyzing th
 
 RULES:
 --Any document explicitly stating claim rules OVERRIDE these general guidelines.
---Repairs, maintenance, cleaning/carpet cleaning,loss of rent due to inhability, reletting fees, are generally covered.
---Admin/other fees (EXCEPT for reletting fees), utilities, unpaid rent, pet incurred damages, pest control, gutter cleaning, are generally NOT covered.
+--Repairs, maintenance, cleaning/carpet cleaning,loss of rent due to inhability, reletting fees, unpaid rent, are generally covered.
+--Admin/other fees, utilities, pet incurred damages, pest control, gutter cleaning, are generally NOT covered.
 --When in doubt, allow the charge to be covered.
 
 """
-    # Note: Unpaid rent seems to be covered and not covered in different cases.
+    # Note: Unpaid rent seems to be covered and not covered in different cases
 
     try:
         response = client.messages.create(
@@ -247,8 +248,14 @@ RULES:
             )
             max_benefit = int(float(max_benefit_str))
 
+            # Get claim amount
+            claim_amount_str = (
+                claim_data.get("Amount of Claim").replace("$", "").replace(",", "")
+            )
+            claim_amount = int(float(claim_amount_str))
+
             approved_benefit = calculate_approved_benefit(
-                total_covered, max_benefit, monthly_rent
+                total_covered, max_benefit, claim_amount, monthly_rent
             )
 
             return {
@@ -274,7 +281,6 @@ def process_claim_by_folder_number(folder_number):
 
     for file_info in folder_info:
         content = extract_document_content(file_info["path"])
-        print(f"File content: {content}")
         if "error" not in content:
             print(f"Content: {content["text"][:20]}")
             folder_contents.append(content)
@@ -331,9 +337,14 @@ def process_claim_by_folder_number(folder_number):
     )
     max_benefit = int(float(max_benefit_str))
 
+    requested_claim_str = (
+        claim_data.get("Amount of Claim").replace("$", "").replace(",", "")  # type: ignore
+    )
+    requested_claim = int(float(requested_claim_str))
+
     return {
         "approved_benefit": calculate_approved_benefit(
-            max_benefit, max_benefit, monthly_rent
+            max_benefit, max_benefit, requested_claim, monthly_rent
         )
     }
 
@@ -352,6 +363,12 @@ def process_claims_batch(folder_numbers, row_id=None):
             ):
                 print("Invalid row: ", folder_number)
                 continue
+
+            folder_path = Path(str(folder_number))
+            if not folder_path.exists() or not folder_path.is_dir():
+                print(f"Folder {folder_number} does not exist, skipping...")
+                continue
+
             result = process_claim_by_folder_number(folder_number)
             print(
                 "Result for folder ", folder_number, ": ", json.dumps(result, indent=2)
@@ -376,9 +393,6 @@ def process_claims_batch(folder_numbers, row_id=None):
         except Exception as e:
             print(f"Error processing folder {folder_number}: {str(e)}")
 
-        if i < len(folder_numbers) - 1:
-            time.sleep(10)
-
     if row_id:
         update_database_result(row_id, result_list)
 
@@ -402,16 +416,16 @@ if __name__ == "__main__":
         print(f"Script failed: {str(e)}")
         sys.exit(1)
 
-# 365 -- partial payout, no coverage income HOA violations, covering property damages only (can't read itemized doc--will payout full)
-# 373 -- normal full payout (good)
-# 405 -- AI thinks it shouldn't pay out for unpaid rent (in another case this is correct behavior)
+# 365 -- partial payout, no coverage income HOA violations, covering property damages only (can't read itemized doc--will payout ful OR payout tiny--BAD ERROR)
+# 373 -- normal full payout -- fails to read, tries to round to rent (error of 20%--not terrible)
+# 405 -- AI thinks it shouldn't pay out for unpaid rent (big error I think)
 # 413 -- partial payout excluding tenant fees (good)
 # 417 -- partial--excludes fees (good)
+# 449 -- No coverage for asset protection fee or utility expenses -- (quite close)
+# 455 -- No coverage pest/gutter -- (quite close)
 # 456 -- payout limited by max benefit (good)
-# 455 -- No coverage pest/gutter -- (good)
-# 449 -- No coverage for asset protection fee or utility expenses -- (good)
-# 726 -- gives full payout (can't read itemized doc--will payout full)
-# 727 -- partial excluding fees (good)
-# 757 -- normal full payout (good)
-# 703 -- constrained by monthly rent
+# 703 -- constrained by monthly rent (good)
 # 705 -- constrained by montly rent (good)
+# 726 -- gives full payout (can't read itemized, pays out full--turns out to be low error))
+# 728 -- partial excluding fees (correctly excludes fees--good)
+# 757 -- normal full payout (pays out full--good)
