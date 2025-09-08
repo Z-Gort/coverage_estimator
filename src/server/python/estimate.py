@@ -395,3 +395,18 @@ if __name__ == "__main__":
 # 726 -- gives full payout (can't read itemized, pays out full--turns out to be low error))
 # 728 -- partial excluding fees (correctly excludes fees--good)
 # 757 -- normal full payout (pays out full--good)
+
+# MISTRAL:
+# 365 -- partial payout, no coverage income HOA violations, covering property damages only (misses some of the charges, but still gets correct)
+# 373 -- normal full payout -- fails to read, tries to round to rent (error of 20%--not terrible)
+# 405 -- AI thinks it shouldn't pay out for unpaid rent (big error I think)
+# 413 -- partial payout excluding tenant fees (good)
+# 417 -- partial--excludes fees (good)
+# 449 -- No coverage for asset protection fee or utility expenses -- (quite close)
+# 455 -- No coverage pest/gutter -- (quite close)
+# 456 -- payout limited by max benefit (good)
+# 703 -- constrained by monthly rent (good)
+# 705 -- constrained by montly rent (good)
+# 726 -- gives full payout (can't read itemized, pays out full--turns out to be low error))
+# 728 -- partial excluding fees (correctly excludes fees--good)
+# 757 -- normal full payout (pays out full--good)

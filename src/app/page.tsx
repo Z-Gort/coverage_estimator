@@ -265,32 +265,18 @@ export default function Home() {
                               labelStyle={{ display: "none" }}
                             />
                             <ReferenceLine
-                              segment={[
-                                {
-                                  x: Math.min(
-                                    ...parsedResults.map((r) =>
-                                      Math.min(r.aiAnswer, r.actualAnswer),
-                                    ),
-                                  ),
-                                  y: Math.min(
-                                    ...parsedResults.map((r) =>
-                                      Math.min(r.aiAnswer, r.actualAnswer),
-                                    ),
-                                  ),
-                                },
-                                {
-                                  x: Math.max(
-                                    ...parsedResults.map((r) =>
-                                      Math.max(r.aiAnswer, r.actualAnswer),
-                                    ),
-                                  ),
-                                  y: Math.max(
-                                    ...parsedResults.map((r) =>
-                                      Math.max(r.aiAnswer, r.actualAnswer),
-                                    ),
-                                  ),
-                                },
-                              ]}
+                              segment={(() => {
+                                const allValues = parsedResults.flatMap((r) => [
+                                  r.aiAnswer,
+                                  r.actualAnswer,
+                                ]);
+                                const min = Math.min(...allValues);
+                                const max = Math.max(...allValues);
+                                return [
+                                  { x: min, y: min },
+                                  { x: max, y: max },
+                                ];
+                              })()}
                               stroke="#666"
                               strokeDasharray="2 2"
                               opacity={0.5}
@@ -304,9 +290,6 @@ export default function Home() {
                             />
                           </ScatterChart>
                         </ResponsiveContainer>
-                        <div className="mt-1 text-center text-xs text-gray-500">
-                          Perfect predictions would fall on the diagonal line
-                        </div>
                       </CardContent>
                     </Card>
                   )}
