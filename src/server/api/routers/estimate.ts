@@ -7,33 +7,37 @@ import { posts } from "~/server/db/schema";
 
 export const estimateRouter = createTRPCRouter({
   create: publicProcedure
-    .input(z.object({ input: z.number() }))
+    .input(z.object({ folderNumbers: z.array(z.number()) }))
     .mutation(async ({ ctx, input }) => {
       // Insert row and get the ID
       const result = await ctx.db
         .insert(posts)
         .values({
-          input: input.input,
+          result: null,
         })
         .returning();
 
       const rowId = result[0]!.id;
 
-      // Spawn Python script with row ID and input
+      // Convert array to comma-separated string
+      const folderNumbersStr = input.folderNumbers.join(",");
+
+      console.log(`[Python process] Spawning with row ID: ${rowId}, folder numbers: ${folderNumbersStr}`);
+
+      // Spawn Python script with row ID first, then folder numbers
       const pythonProcess = spawn(
         path.join(process.cwd(), "src/server/python/venv/bin/python"),
         [
           path.join(process.cwd(), "src/server/python/estimate.py"),
-          input.input.toString(),
           rowId.toString(),
+          folderNumbersStr,
         ],
         {
           cwd: path.join(process.cwd(), "src/server/python"),
-          stdio: ["pipe", "pipe", "pipe"], // Enable stdout/stderr capture
+          stdio: ["pipe", "pipe", "pipe"],
         },
       );
 
-      // Log Python script output for debugging
       pythonProcess.stdout?.on("data", (data) => {
         console.log(`[Python stdout]: ${data}`);
       });
