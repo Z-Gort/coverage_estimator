@@ -75,7 +75,6 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
         # Clip PDF if >8 pages
         pdf_to_process = file_path
         if file_extension == ".pdf" and count_pdf_pages(file_path) > 8:
-            print(f"Clipping PDF to 8 pages")
             temp_fd, temp_pdf_path = tempfile.mkstemp(suffix=".pdf", prefix="clipped_")
             os.close(temp_fd)
             pdf_to_process = temp_pdf_path
@@ -96,6 +95,12 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
                 else "image/jpeg"
             )
             document_url = f"data:{mime_type};base64,{base64_data}"
+        elif file_extension == ".docx":
+            with open(file_path, "rb") as f:
+                import base64
+
+                base64_data = base64.b64encode(f.read()).decode("utf-8")
+            document_url = f"data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{base64_data}"
         else:
             return {
                 "has_itemized_charges": False,
@@ -183,10 +188,9 @@ def analyze_itemized_charge_coverage(charge_items, claim_data, monthly_rent=None
                 f"Filtered {len(charge_items) - len(filtered_charge_items)} rent charges after lease end date {lease_end_date_str}"
             )
             charge_items = filtered_charge_items
-
-    print(f"AFTER FILTERING: {charge_items}")
     # If no charge items remain after filtering, return error to use backup calculation
     if not charge_items:
+        print("No charge items remaining after filtering")
         return {"error": "No charge items remaining after filtering"}
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -205,7 +209,7 @@ For each charge in order, determine if it's covered by insurance following the g
 RULES:
 --When in doubt, COVER THE CHARGE
 --COVERED: Repairs, maintenance, cleaning/carpet cleaning, loss of rent, unpaid rent, and anything not mentioned as NOT COVERED
---NOT COVERED: Fees (asset protection, admin, reletting, amenity service packages, sd deposit charges, late, any other fee), utilities, ANY pet related damages/expenses, RIS plan, pest control, gutter cleaning, HOA violations, renter's insurance
+--NOT COVERED: Fees (asset protection, admin, reletting, amenity service packages, sd deposit charges, late, any other fee), utilities, ANY pet related damages/expenses, RIS plan, pest control, gutter cleaning, HOA violations, renter's insurance, garage rent
 
 """
     # Note: Unpaid rent seems to be covered and not covered in different cases
@@ -287,6 +291,7 @@ RULES:
         else:
             return {"error": "Unexpected response format"}
     except Exception as e:
+        print("API call failed", str(e))
         return {"error": f"API call failed: {str(e)}"}
 
 
@@ -324,7 +329,6 @@ def process_claim_by_folder_number(folder_number):
     for file_info in folder_info:
         # Analyze document with OCR for charges only
         charge_analysis = analyze_individual_document_for_charges_ocr(file_info["path"])
-        print(f"Charge analysis: {charge_analysis}")
 
         # Check for itemized charges
         if charge_analysis.get("has_itemized_charges"):
