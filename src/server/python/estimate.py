@@ -59,9 +59,6 @@ class DocumentChargeAnalysis(BaseModel):
 
     IS_RENT:
     --ONLY if you are confident a charge represents unpaid rent, set is_rent to True.
-
-    SPECIAL CASE:
-    If the document is called ledger and has a 'balance as of' and 'total unpaid' in the grid. Then look to grab all the charges ABOVE the last paid rent.
     """
 
     has_itemized_charges: bool  # True if the document contains a clear list/enumeration of specific charges with individual costs
@@ -186,6 +183,28 @@ def analyze_itemized_charge_coverage(charge_items, claim_data, monthly_rent=None
                 f"Filtered {len(charge_items) - len(filtered_charge_items)} rent charges after lease end date {lease_end_date_str}"
             )
             charge_items = filtered_charge_items
+
+    # If no charge items remain after filtering, use backup calculation
+    if not charge_items:
+        print("No charge items remaining after filtering, using backup calculation")
+        max_benefit_str = (
+            claim_data.get("Max Benefit").replace("$", "").replace(",", "")  # type: ignore
+        )
+        max_benefit = int(float(max_benefit_str))
+
+        requested_claim_str = (
+            claim_data.get("Amount of Claim").replace("$", "").replace(",", "")  # type: ignore
+        )
+        requested_claim = int(float(requested_claim_str))
+
+        approved_benefit = calculate_approved_benefit(
+            max_benefit, max_benefit, requested_claim, monthly_rent, claim_data
+        )
+
+        return {
+            "approved_benefit": approved_benefit,
+            "coverage_decisions": [],
+        }
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -467,6 +486,7 @@ if __name__ == "__main__":
 
 # MISTRAL:
 # 365 -- partial payout, no coverage income HOA violations, covering property damages only (misses some of the charges, but still gets correct)
+# 366 -- (works out to pretty low error--but how it gets there is pretty shaky--seems to almost miss correct itemization)
 # 373 -- normal full payout -- (can't read, then limits on rent rounded up but for some reason shouldn't--medium error))
 # 405 --  (caps on monthly rent--annoying--prety big error)
 # 413 -- partial payout excluding tenant fees (good)
