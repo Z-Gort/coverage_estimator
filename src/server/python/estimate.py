@@ -49,10 +49,12 @@ class DocumentChargeAnalysis(BaseModel):
     The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't necessarily showing outstanding costs.
 
     SPECIAL CASE:
-    If the document is called ledger and has a 'balance as of' and 'total unpaid' in the grid. Then look to grab all the charges AFTER the last paid rent. """
+    If the document is called ledger and has a 'balance as of' and 'total unpaid' in the grid. Then look to grab all the charges AFTER the last paid rent.
+    """
 
     has_itemized_charges: bool  # True if the document contains a clear list/enumeration of specific charges with individual costs
     charge_items: list[ChargeItem]  # Array of itemized charges found in the document
+
 
 def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any]:
     """Analyze document using Mistral OCR with document annotations."""
@@ -183,14 +185,8 @@ Find any monthly rent amount mentioned (from lease agreements, rent schedules, l
         return None
 
 
-def analyze_itemized_charge_coverage(
-    charge_items, folder_contents, claim_data, monthly_rent=None
-):
+def analyze_itemized_charge_coverage(charge_items, claim_data, monthly_rent=None):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-    evidence_text = ""
-    for doc in folder_contents:
-        evidence_text += f"\n--- {doc['title']} ---\n{doc['text']}"
 
     charges_text = ""
     for i, item in enumerate(charge_items, 1):
@@ -201,16 +197,12 @@ def analyze_itemized_charge_coverage(
 ITEMIZED CHARGES TO ANALYZE:
 {charges_text}
 
-SUPPORTING DOCUMENTS:
-{evidence_text}
-
-For each charge in order, determine if it's covered by insurance by analyzing the documents and following the given decision rules.
+For each charge in order, determine if it's covered by insurance following the given decision rules.
 
 RULES:
---Any document explicitly stating claim rules OVERRIDE these general guidelines.
---Repairs, maintenance, cleaning/carpet cleaning,loss of rent due to inhability, reletting fees, unpaid rent, are generally covered.
+--Repairs, maintenance, cleaning/carpet cleaning, loss of rent due to inability, reletting fees, unpaid rent, are generally covered.
 --Admin/other fees, utilities, pet incurred damages, pest control, gutter cleaning, are generally NOT covered (anything not listed is generally covered).
---When in doubt, allow the COVER THE CHARGE.
+--When in doubt, COVER THE CHARGE.
 
 """
     # Note: Unpaid rent seems to be covered and not covered in different cases
@@ -298,7 +290,6 @@ def process_claim_by_folder_number(folder_number):
     claim_data = claims_dict.get(str(folder_number))
 
     folder_info = read_folder_contents(str(folder_number))
-    folder_contents = []
     charge_items = []
     found_itemized_doc = False
     monthly_rent = None
@@ -320,7 +311,6 @@ def process_claim_by_folder_number(folder_number):
             content = extract_document_content(file_info["path"])
             if "error" not in content:
                 print(f"Content: {content["text"][:20]}")
-                folder_contents.append(content)
 
                 doc_monthly_rent = analyze_document_for_monthly_rent(content)
                 if doc_monthly_rent:
@@ -347,7 +337,7 @@ def process_claim_by_folder_number(folder_number):
                 total_charges >= 0.8 * claim_amount
             ):  # Note: there are one or two docs the AI can't reliably parse--so total_charges can be off.
                 return analyze_itemized_charge_coverage(
-                    charge_items, folder_contents, claim_data, monthly_rent
+                    charge_items, claim_data, monthly_rent
                 )
             else:
                 print(
