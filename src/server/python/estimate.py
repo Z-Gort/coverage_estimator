@@ -49,6 +49,7 @@ class DocumentChargeAnalysis(BaseModel):
     RULES:
     --ONLY include charges which are outstanding at move-out/still due. NOT charges that were already paid.
     --If document shows both paid and unpaid items, look items which still have UNPAID balance.
+    --IMPORTANT: If the doc has paid and unpaid items--aim for the unpaid items to add to TOTAL BALANCE DUE--often unpaid items will be at the very bottom or top of the doc and will come ABOVE or BELOW the last paid items. DONT INCLUDE PAID RENT/ITEMS
 
     NOTE:
     --The document should have specific line items with costs, not just summary amounts. Note that ledgers of charges/costs aren't necessarily showing outstanding costs.
@@ -353,6 +354,7 @@ def process_claim_by_folder_number(folder_number):
                 charge_items = current_charge_items
                 found_itemized_doc = True
 
+    print(f"FINAL ITEMIZED DOC: {charge_items}")
     if found_itemized_doc:
         total_charges = sum(item["cost"] for item in charge_items)
         print(
@@ -506,3 +508,15 @@ if __name__ == "__main__":
 # group--T00001, T00002,
 # NOT rent capped:
 # T0004, T0002 (group 30),
+
+# dont cover for anything if no paid rent
+
+# PASS 2
+# 365 - Can't read itemized doc--includes too many paid items/normal rent
+# 366 - Can't almost can read but can't -- so throws away what would've been ok data
+# 373 - potentially correct--easy case of limiting on claim_amount, unsure if actually perfect
+# 405 - caps on rent--leads to pretty big error
+# 413 - reads and excldues fees -- good
+# 417 -- covers rent when it shouldn't in this case -- may be good if fixed
+
+

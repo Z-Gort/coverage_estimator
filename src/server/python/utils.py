@@ -8,7 +8,6 @@ from PyPDF2 import PdfReader, PdfWriter
 from datetime import datetime
 from typing import Optional
 
-
 # API Keys
 ANTHROPIC_API_KEY = "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"
 MISTRAL_API_KEY = "hnEcbqbI4cumUHOY8yew25sLjLG1Yoyb"
@@ -110,106 +109,6 @@ def encode_pdf_to_base64(pdf_path):
     except Exception as e:
         print(f"Error: {e}")
         return None
-
-
-def encode_image_to_base64(image_path):
-    """Encode the image to base64."""
-    try:
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode("utf-8")
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
-
-
-def extract_document_content(file_path):
-    file_path = Path(file_path)
-    file_extension = file_path.suffix.lower()
-    try:
-        if file_extension == ".pdf":
-            content = _extract_pdf_content(file_path)
-            return content
-        elif file_extension in [".jpg", ".jpeg", ".png", ".tiff", ".bmp"]:
-            content = _extract_image_content(file_path)
-            return content
-        else:
-            return {"error": f"Unsupported file type: {file_extension}"}
-    except Exception as e:
-        return {"error": f"Failed to extract content: {str(e)}"}
-
-
-def _extract_pdf_content(file_path):
-    content = {
-        "title": Path(file_path).name,
-        "file_path": str(file_path),
-        "file_type": "pdf",
-        "text": "",
-    }
-
-    # Encode PDF to base64
-    base64_pdf = encode_pdf_to_base64(file_path)
-
-    try:
-        client = Mistral(api_key=MISTRAL_API_KEY)
-
-        ocr_response = client.ocr.process(
-            model="mistral-ocr-latest",
-            document={
-                "type": "document_url",
-                "document_url": f"data:application/pdf;base64,{base64_pdf}",
-            },
-            include_image_base64=True,
-        )
-
-        content["text"] = getattr(ocr_response.pages[0], "markdown", "")
-
-        return content
-
-    except Exception as e:
-        print(f"Error processing PDF {file_path}: {e}")
-        return {"error": f"Mistral OCR failed: {str(e)}"}
-
-
-def _extract_image_content(file_path):
-    content = {
-        "title": Path(file_path).name,
-        "file_path": str(file_path),
-        "file_type": "image",
-        "text": "",
-    }
-
-    base64_image = encode_image_to_base64(file_path)
-
-    try:
-        client = Mistral(api_key=MISTRAL_API_KEY)
-
-        # Determine image format for proper MIME type
-        file_extension = Path(file_path).suffix.lower()
-        mime_type_map = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".tiff": "image/tiff",
-            ".bmp": "image/bmp",
-        }
-        mime_type = mime_type_map.get(file_extension, "image/jpeg")
-
-        ocr_response = client.ocr.process(
-            model="mistral-ocr-latest",
-            document={
-                "type": "image_url",
-                "image_url": f"data:{mime_type};base64,{base64_image}",
-            },
-            include_image_base64=True,
-        )
-
-        content["text"] = getattr(ocr_response.pages[0], "markdown", "")
-
-        return content
-
-    except Exception as e:
-        print(f"Error processing image {file_path}: {e}")
-        return {"error": f"Mistral OCR failed: {str(e)}"}
 
 
 def calculate_monthly_rent_ceiling(monthly_rent: int) -> int:
