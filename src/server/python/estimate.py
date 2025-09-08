@@ -40,6 +40,7 @@ class DocumentChargeAnalysis(BaseModel):
     - Repair/cleaning costs
     - Damage charges
     - Fee breakdowns
+    - Pending unpaid rent
 
     RULES:
     --ONLY include charges which are outstanding at move-out/still due. NOT charges that were already paid.
@@ -60,6 +61,7 @@ class DocumentChargeAnalysis(BaseModel):
 
 def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any]:
     """Analyze document using Mistral OCR with document annotations."""
+    temp_pdf_path = None
     try:
         file_path_obj = Path(file_path)
         file_extension = file_path_obj.suffix.lower()
@@ -68,8 +70,9 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
         pdf_to_process = file_path
         if file_extension == ".pdf" and count_pdf_pages(file_path) > 8:
             print(f"Clipping PDF to 8 pages")
-            temp_fd, pdf_to_process = tempfile.mkstemp(suffix=".pdf", prefix="clipped_")
+            temp_fd, temp_pdf_path = tempfile.mkstemp(suffix=".pdf", prefix="clipped_")
             os.close(temp_fd)
+            pdf_to_process = temp_pdf_path
             clip_pdf_to_pages(file_path, pdf_to_process, max_pages=8)
 
         # Encode to base64
@@ -134,6 +137,10 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
             "charge_items": [],
             "error": f"OCR failed: {str(e)}",
         }
+    finally:
+        # Clean up temporary PDF file
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.unlink(temp_pdf_path)
 
 
 def analyze_itemized_charge_coverage(charge_items, claim_data, monthly_rent=None):
@@ -392,24 +399,29 @@ if __name__ == "__main__":
 # MISTRAL:
 # 365 -- partial payout, no coverage income HOA violations, covering property damages only (misses some of the charges, but still gets correct)
 # 373 -- normal full payout -- (can't read, then limits on rent rounded up but for some reason shouldn't--medium error))
-# 405 -- AI thinks it shouldn't pay out for unpaid rent (caps on monthly rent--annoying--prety big error)
+# 405 --  (caps on monthly rent--annoying--prety big error)
 # 413 -- partial payout excluding tenant fees (good)
 # 417 -- partial--excludes fees (incorrect, overshot, fairly large error--this is a tough one because unpaid rent is not covered here but sometimes is)
 # 449 -- No coverage for asset protection fee or utility expenses -- (good)
 # 455 -- No coverage pest/gutter -- (pretty low error)
 # 456 -- payout limited by max benefit -- (correct)
-# 703 -- constrained by monthly rent  --
-# 705 -- constrained by montly rent
+# 703 -- constrained by monthly rent  --(correct)
+# 705 -- constrained by montly rent --(correct)
 # 726 -- gives full payout
 # 728 -- partial excluding fees
 # 757 -- normal full payout
 
 # PRIORITIES:
-# figure out monthly rent cap
 # go through and use all notes to make not-covered list--also improve prompt syntax for claude
 # lease/security deposit deadline coverage cases
 # best itemization optimization
 
+#  Pushed off:
+# figure out monthly rent cap
+
 
 # Montly rent pattern finding:
-# 
+# policy 27291, 156115, 19972R
+# group--T00001, T00002,
+# NOT rent capped:
+# T0004, T0002 (group 30),
