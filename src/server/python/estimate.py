@@ -12,7 +12,6 @@ from mistralai.extra import response_format_from_pydantic_model
 from utils import (
     read_security_deposit_claims,
     read_folder_contents,
-    extract_document_content,
     update_database_result,
     ANTHROPIC_API_KEY,
     MISTRAL_API_KEY,
@@ -41,6 +40,7 @@ class DocumentChargeAnalysis(BaseModel):
     - Repair/cleaning costs
     - Damage charges
     - Fee breakdowns
+    - Monthly rent amounts (from lease agreements, rent schedules, ledgers showing monthly rent payments)
 
     RULES:
     --ONLY include charges which are outstanding at move-out/still due. NOT charges that were already paid.
@@ -54,6 +54,9 @@ class DocumentChargeAnalysis(BaseModel):
 
     has_itemized_charges: bool  # True if the document contains a clear list/enumeration of specific charges with individual costs
     charge_items: list[ChargeItem]  # Array of itemized charges found in the document
+    monthly_rent: (
+        int | None
+    )  # Monthly rent amount in dollars if found in the document, null if not found
 
 
 def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any]:
@@ -89,6 +92,7 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
             return {
                 "has_itemized_charges": False,
                 "charge_items": [],
+                "monthly_rent": None,
                 "error": f"Unsupported file type",
             }
 
@@ -113,16 +117,19 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
                 {"cost": int(item["cost"]), "description": str(item["description"])}
                 for item in annotation_data.get("charge_items", [])
             ]
+            monthly_rent = annotation_data.get("monthly_rent")
             return {
                 "has_itemized_charges": bool(
                     annotation_data.get("has_itemized_charges", False)
                 ),
                 "charge_items": charge_items,
+                "monthly_rent": int(monthly_rent) if monthly_rent else None,
             }
         else:
             return {
                 "has_itemized_charges": False,
                 "charge_items": [],
+                "monthly_rent": None,
                 "error": "No annotation data found",
             }
 
@@ -130,59 +137,9 @@ def analyze_individual_document_for_charges_ocr(file_path: str) -> Dict[str, Any
         return {
             "has_itemized_charges": False,
             "charge_items": [],
+            "monthly_rent": None,
             "error": f"OCR failed: {str(e)}",
         }
-
-
-def analyze_document_for_monthly_rent(document_content: Dict[str, Any]) -> int | None:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-    prompt = f"""Look for any monthly rent amount in this document.
-
-TITLE: {document_content.get('title', '')}
-DOCUMENT CONTENT: {document_content.get('text', '')}
-
-Find any monthly rent amount mentioned (from lease agreements, rent schedules, ledgers showing monthly rent payments, etc.)."""
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}],
-            tools=[
-                {
-                    "name": "extract_monthly_rent",
-                    "description": "Extract monthly rent amount if found",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "monthly_rent": {
-                                "type": "integer",
-                                "description": "Monthly rent amount in dollars, null if not found",
-                            }
-                        },
-                        "required": ["monthly_rent"],
-                    },
-                }
-            ],
-            tool_choice={"type": "tool", "name": "extract_monthly_rent"},
-        )
-
-        tool_use = response.content[0]
-        print(f"Monthly rent tool use: {tool_use}")
-        if tool_use.type == "tool_use" and tool_use.name == "extract_monthly_rent":
-            result = tool_use.input  # type: ignore
-            monthly_rent = result.get("monthly_rent")  # type: ignore
-            # Handle cases where AI returns string "null" instead of None
-            if monthly_rent == "null" or monthly_rent is None:
-                return None
-            # Ensure we return an integer if it's a valid number
-            try:
-                return int(monthly_rent)
-            except (ValueError, TypeError):
-                return None
-    except Exception:
-        return None
 
 
 def analyze_itemized_charge_coverage(charge_items, claim_data, monthly_rent=None):
@@ -296,28 +253,19 @@ def process_claim_by_folder_number(folder_number):
     found_monthly_rent = False
 
     for file_info in folder_info:
-        # Look for itemized charges if not found yet - use OCR directly
-        if not found_itemized_doc:
-            charge_analysis = analyze_individual_document_for_charges_ocr(
-                file_info["path"]
-            )
-            print(f"Charge analysis: {charge_analysis}")
-            if charge_analysis.get("has_itemized_charges"):
-                charge_items = charge_analysis.get("charge_items", [])
-                found_itemized_doc = True
+        # Analyze document with OCR for both charges and monthly rent
+        charge_analysis = analyze_individual_document_for_charges_ocr(file_info["path"])
+        print(f"Charge analysis: {charge_analysis}")
 
-        # Look for monthly rent if not found yet - still need to extract content for this
-        if not found_monthly_rent:
-            content = extract_document_content(file_info["path"])
-            if "error" not in content:
-                print(f"Content: {content["text"][:20]}")
+        # Check for itemized charges if not found yet
+        if not found_itemized_doc and charge_analysis.get("has_itemized_charges"):
+            charge_items = charge_analysis.get("charge_items", [])
+            found_itemized_doc = True
 
-                doc_monthly_rent = analyze_document_for_monthly_rent(content)
-                if doc_monthly_rent:
-                    monthly_rent = doc_monthly_rent
-                    found_monthly_rent = True
-            else:
-                print(f"Error extracting {file_info['path']}: {content['error']}")
+        # Check for monthly rent if not found yet
+        if not found_monthly_rent and charge_analysis.get("monthly_rent"):
+            monthly_rent = charge_analysis.get("monthly_rent")
+            found_monthly_rent = True
 
         # Stop processing if we found both
         if found_itemized_doc and found_monthly_rent:
