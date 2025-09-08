@@ -183,10 +183,11 @@ For each charge in order, determine if it's covered by insurance by analyzing th
 RULES:
 --Any document explicitly stating claim rules OVERRIDE these general guidelines.
 --Repairs, maintenance, cleaning/carpet cleaning,loss of rent due to inhability, reletting fees, are generally covered.
---Admin/other fees (EXCEPT for reletting fees), utilities, pet incurred damages, pest control, gutter cleaning, are generlly not covered.
+--Admin/other fees (EXCEPT for reletting fees), utilities, pet incurred damages, pest control, gutter cleaning, are generally NOT covered.
 --When in doubt, allow the charge to be covered.
 
 """
+#Note: Unpaid rent seems to be covered and not covered in different cases.
 
     try:
         response = client.messages.create(
@@ -273,6 +274,7 @@ def process_claim_by_folder_number(folder_number):
 
     for file_info in folder_info:
         content = extract_document_content(file_info["path"])
+        print(f"File content: {content}")
         if "error" not in content:
             print(f"Content: {content["text"][:20]}")
             folder_contents.append(content)
@@ -311,8 +313,7 @@ def process_claim_by_folder_number(folder_number):
             claim_amount = int(float(claim_amount_str))
             if (
                 total_charges >= 0.8 * claim_amount
-                and total_charges <= claim_amount * 1.2
-            ):  # Note: there are one or two docs the AI can't reliably parse--so total_charges can be off
+            ):  # Note: there are one or two docs the AI can't reliably parse--so total_charges can be off.
                 return analyze_itemized_charge_coverage(
                     charge_items, folder_contents, claim_data, monthly_rent
                 )
@@ -413,10 +414,11 @@ if __name__ == "__main__":
 
 # 365 -- partial payout, no coverage income HOA violations, covering property damages only (can't read itemized doc--will payout full)
 # 373 -- normal full payout (good)
+# 405 -- AI thinks it shouldn't pay out for unpaid rent (in another case this is correct behavior)
 # 413 -- partial payout excluding tenant fees (good)
 # 417 -- partial--excludes fees (good)
 # 456 -- payout limited by max benefit (good)
-# 455 -- No coverage pest/gutter (difficult) -- (good)
+# 455 -- No coverage pest/gutter -- (good)
 # 449 -- No coverage for asset protection fee or utility expenses -- (good)
 # 726 -- gives full payout (can't read itemized doc--will payout full)
 # 727 -- partial excluding fees (good)
